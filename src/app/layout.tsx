@@ -10,12 +10,12 @@ const geologica = Geologica({
 });
 
 export const metadata: Metadata = {
-  title: "Homing · Find your part of any city",
+  title: "Homing | Find your part of any city",
   description:
     "Tell Homing a few things you love. It maps where people with your taste gather in a city, which neighborhood fits you and what to do there.",
   icons: { icon: "/icon.svg" },
   openGraph: {
-    title: "Homing · Find your part of any city",
+    title: "Homing | Find your part of any city",
     description: "A taste map of any city, built from the things you love with Qloo's taste graph.",
   },
 };

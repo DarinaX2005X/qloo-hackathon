@@ -3,8 +3,15 @@ import { ApiError, apiError } from "@/shared/contracts";
 
 export type QlooParams = Record<string, string | number | undefined>;
 export type QlooRecord = Record<string, unknown>;
-const cache = new Map<string, { value: unknown; expires: number }>();
-const pending = new Map<string, Promise<unknown>>();
+type QlooRuntime = {
+  cache: Map<string, { value: unknown; expires: number }>;
+  pending: Map<string, Promise<unknown>>;
+  active: number;
+  queue: (() => void)[];
+};
+const processGlobal = globalThis as typeof globalThis & { __homingQlooRuntime?: QlooRuntime };
+const runtime = processGlobal.__homingQlooRuntime ??= { cache: new Map(), pending: new Map(), active: 0, queue: [] };
+const { cache, pending } = runtime;
 const TTL = 604800;
 
 export function record(value: unknown): QlooRecord {
@@ -54,26 +61,52 @@ export function clearQlooCache(): void {
   cache.clear();
 }
 
+export async function acquireQlooSlot(): Promise<void> {
+  if (runtime.active < 4) { runtime.active++; return; }
+  await new Promise<void>((resolve) => { runtime.queue.push(resolve); });
+}
+
+export function releaseQlooSlot(): void {
+  const next = runtime.queue.shift();
+  if (next) next(); // Transfer the occupied slot to the oldest waiter.
+  else runtime.active--;
+}
+
+export async function fetchQlooAttempt(url: URL, apiKey: string): Promise<{ status: number; value?: unknown }> {
+  await acquireQlooSlot();
+  try {
+    const response = await fetch(url, {
+      method: "GET", headers: { "X-Api-Key": apiKey },
+      signal: AbortSignal.timeout(9000), next: { revalidate: TTL },
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return { status: response.status };
+    }
+    const value: unknown = await response.json();
+    if (!record(value).results || record(value).success === false)
+      throw apiError("qloo_unavailable", "Qloo returned an unexpected response.", true);
+    return { status: response.status, value: trimResponse(value) };
+  } finally { releaseQlooSlot(); }
+}
+
 export async function fetchQloo(url: URL, apiKey: string): Promise<unknown> {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch(url, {
-        method: "GET",
-        headers: { "X-Api-Key": apiKey },
-        signal: AbortSignal.timeout(9000),
-        next: { revalidate: TTL },
-      });
-      if ((response.status === 429 || response.status >= 500) && attempt === 0) {
-        await response.body?.cancel();
+      const response = await fetchQlooAttempt(url, apiKey);
+      if (response.status === 429 && attempt < 2) {
+        const delay = [700, 1500][attempt] + Math.floor(Math.random() * 201);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      if (response.status >= 500 && attempt === 0) {
         await new Promise((resolve) => setTimeout(resolve, 600));
         continue;
       }
       if (response.status === 429) throw apiError("quota", "Qloo request quota exceeded. Try again shortly.", true);
-      if (!response.ok) throw apiError("qloo_unavailable", "Qloo could not complete the request.", response.status >= 500);
-      const value: unknown = await response.json();
-      if (!record(value).results || record(value).success === false)
-        throw apiError("qloo_unavailable", "Qloo returned an unexpected response.", true);
-      return trimResponse(value);
+      if (response.status < 200 || response.status >= 300)
+        throw apiError("qloo_unavailable", "Qloo could not complete the request.", response.status >= 500);
+      return response.value;
     } catch (error) {
       const parsed = ApiError.safeParse(error);
       if (parsed.success) throw parsed.data;

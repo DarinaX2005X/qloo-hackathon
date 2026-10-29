@@ -5,6 +5,7 @@ import { searchEntities, searchPlaceTags } from "@/server/qloo";
 import { buildField, rankNeighborhoods } from "@/server/engine";
 import { asFailure, fail, withSignal } from "./errors";
 import type { ChatTool } from "./llm";
+import { rankingChanged } from "./final";
 
 export const ToolArguments = {
   search_entities: z.strictObject({ name: z.string().trim().min(1).max(120), domain: Domain.optional() }),
@@ -29,24 +30,30 @@ export type ToolContext = {
   entities: Map<string, EntityRef>;
   tags: Map<string, TagRef>;
   ranking: Neighborhood[] | null;
+  addedRefinements: Set<string>;
   signal: AbortSignal;
 };
 export type ToolResult = { summary: string; value: unknown; ops?: StatePatch[] };
 
 export function createToolContext(state: ExploreState, signal: AbortSignal): ToolContext {
-  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, signal };
+  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, addedRefinements: new Set(), signal };
   for (const love of [...state.loves, ...(state.companion?.loves ?? [])]) {
-    for (const entity of [...love.candidates, ...(love.chosen ? [love.chosen] : [])]) context.entities.set(entity.id, entity);
+    for (const entity of [...love.candidates, ...(love.chosen ? [love.chosen] : [])]) context.entities.set(entityKey(entity), entity);
   }
   for (const tag of state.refinements) context.tags.set(tag.id, tag);
   return context;
 }
 
+export function entityKey(entity: EntityRef): string {
+  const id = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(entity.id) ? entity.id.toLowerCase() : entity.id;
+  return `${id}:${entity.domain}`;
+}
+
 export function validateLove(love: ResolvedLove, context: ToolContext): void {
   if (!love.query.trim()) throw fail("bad_input", "A favourite needs a name.", 400);
   for (const entity of [...love.candidates, ...(love.chosen ? [love.chosen] : [])]) {
-    const known = context.entities.get(entity.id);
-    if (!known || known.name !== entity.name || known.domain !== entity.domain) {
+    const known = context.entities.get(entityKey(entity));
+    if (!known || known.name.trim().toLowerCase() !== entity.name.trim().toLowerCase()) {
       throw fail("bad_input", "Search for the favourite before adding it; preserve its returned id, name and domain.", 400);
     }
   }
@@ -57,8 +64,8 @@ export function canonicalizeLove(love: ResolvedLove, context: ToolContext): Reso
   validateLove(love, context);
   return ResolvedLove.parse({
     ...love,
-    chosen: love.chosen ? context.entities.get(love.chosen.id) : null,
-    candidates: love.candidates.map((entity) => context.entities.get(entity.id)),
+    chosen: love.chosen ? context.entities.get(entityKey(love.chosen)) : null,
+    candidates: love.candidates.map((entity) => context.entities.get(entityKey(entity))),
   });
 }
 
@@ -71,6 +78,11 @@ export function canonicalizeChanges(ops: StatePatch[], context: ToolContext): St
 }
 
 export function validateChanges(ops: StatePatch[], context: ToolContext): void {
+  const additions = new Set(context.addedRefinements);
+  for (const op of ops) {
+    if (op.op === "add_refinement" && !context.state.refinements.some((tag) => tag.id === op.tag.id)) additions.add(op.tag.id);
+  }
+  if (additions.size > 2) throw fail("bad_input", "Add at most two new place preferences per request. Choose laptop friendly, free wifi or cafe when relevant.", 400);
   const changedProfile = JSON.stringify(applyPatches(context.state, ops.filter((op) => op.op !== "select_neighborhood"))) !== JSON.stringify(context.state);
   for (const op of ops) {
     if (op.op === "set_city" && !op.city.trim()) throw fail("bad_input", "A city needs a name.", 400);
@@ -108,7 +120,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       let results: EntityRef[];
       try { results = z.array(EntityRef).parse(await withSignal(searchEntities(query, domain), context.signal)).slice(0, 6); }
       catch (error) { throw asFailure(error, "qloo"); }
-      for (const entity of results) context.entities.set(entity.id, entity);
+      for (const entity of results) context.entities.set(entityKey(entity), entity);
       return { summary: `Looked up “${query}” → ${results[0]?.domain.replaceAll("_", " ") ?? "no matches"}`, value: { results } };
     }
     case "search_place_tags": {
@@ -117,7 +129,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       try { results = z.array(TagRef).parse(await withSignal(searchPlaceTags(text), context.signal)); }
       catch (error) { throw asFailure(error, "qloo"); }
       for (const tag of results) context.tags.set(tag.id, tag);
-      return { summary: `Found ${results.length} place tags for “${text}”`, value: { results } };
+      return { summary: `Looked for places matching “${text}”`, value: { results } };
     }
     case "apply_changes": {
       const proposed = ToolArguments.apply_changes.parse(input);
@@ -125,7 +137,13 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       const ops = canonicalizeChanges(proposed.ops, context);
       const next = ExploreState.parse(applyPatches(context.state, ops));
       const changed = JSON.stringify(next) !== JSON.stringify(context.state);
-      if (changed) { context.state = next; context.ranking = null; }
+      if (changed) {
+        for (const tag of next.refinements) {
+          if (!context.state.refinements.some((current) => current.id === tag.id)) context.addedRefinements.add(tag.id);
+        }
+        if (rankingChanged(context.state, next)) context.ranking = null;
+        context.state = next;
+      }
       return { summary: changed ? "Updated your taste profile" : "Your profile already matches these changes", value: { changed, state: context.state }, ...(changed ? { ops } : {}) };
     }
     case "get_ranking": {

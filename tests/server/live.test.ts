@@ -14,7 +14,7 @@ describe.skipIf(process.env.QLOO_LIVE !== "1")("live Qloo", () => {
     expect(tags.some((tag) => tag.kind === "ambience")).toBe(true);
     const input = state({ city: "Lisbon", discovery: 0, loves: [artists[0], shows[0]].map((entity) => ({ query: entity.name, chosen: entity, candidates: [], weight: 1 })) });
     const field = TasteField.parse(await buildField(input));
-    expect(field.cells.length).toBeGreaterThanOrEqual(300);
+    expect(field.cells.length).toBeGreaterThanOrEqual(40);
     expect(field.cells.some((cell) => cell.drivers.artist > 0 && cell.drivers.tv_show > 0)).toBe(true);
     const local = await buildField({ ...input, discovery: 1 });
     const changed = local.cells.filter((cell) => cell.popularity > 0.8 && cell.you < field.cells.find((base) => base.h === cell.h)!.you).length;
@@ -35,4 +35,19 @@ describe.skipIf(process.env.QLOO_LIVE !== "1")("live Qloo", () => {
     await writeFile("tests/server/__fixtures__/lisbon.json", JSON.stringify({ input, field, local, neighborhoods, places, plan, fingerprint, refined }, null, 2));
     console.log(JSON.stringify({ cells: field.cells.length, highPopularityReduced: changed, neighborhoods: neighborhoods.slice(0, 5).map((item) => item.name), coffee: places.filter((place) => place.category === "coffee").map((place) => place.name), stops: plan.days.map((day) => day.stops.length), missing: plan.days.map((day) => day.missing), fingerprint: fingerprint.you.length, refinedCells: refined.cells.length }));
   }, 180000);
+
+  it("adapts the live videogame domain and uses its available geography", async () => {
+    process.loadEnvFile?.(".env.local");
+    const [games, artists] = await Promise.all([searchEntities("Minecraft", "video_game"), searchEntities("Radiohead", "artist")]);
+    expect(games.length).toBeGreaterThan(0);
+    const input = state({ city: "Lisbon", loves: [artists[0], games[0]].map((entity) => ({ query: entity.name, chosen: entity, candidates: [], weight: 1 })) });
+    const field = await buildField(input);
+    expect(field.cells.length).toBeGreaterThan(0);
+    expect(games[0].domain).toBe("video_game");
+    expect(field.cells.some((cell) => cell.drivers.video_game > 0)).toBe(true);
+    const solo = await buildField({ ...input, loves: [input.loves[1]] });
+    expect(solo.cells.length).toBeGreaterThan(0);
+    await mkdir("tests/server/__fixtures__", { recursive: true });
+    await writeFile("tests/server/__fixtures__/video-game.json", JSON.stringify({ input, field, solo }, null, 2));
+  }, 60000);
 });

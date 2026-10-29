@@ -1,0 +1,337 @@
+"use client";
+
+import { AnimatePresence, LayoutGroup, motion } from "motion/react";
+import { ArrowLeft, CalendarPlus, Clock, Copy, Footprints, MapPin, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import type { Category, Domain, Neighborhood, Place } from "@/shared/contracts";
+import { activeLoves } from "@/shared/contracts";
+import { useExplore } from "./store";
+import { Button, Segmented, Skeleton, Spinner } from "@/components/ui/primitives";
+import { DOMAIN_NAME } from "./LoveChips";
+import { download, itineraryToIcs, itineraryToText } from "@/lib/ics";
+
+const VIBE: Record<Neighborhood["vibe"], string> = { local: "Mostly locals", mixed: "Locals and visitors", touristy: "Busy with visitors" };
+const CAT: Record<Category, string> = { coffee: "Coffee", food: "Food", drinks: "Drinks", culture: "Culture", stay: "Stay" };
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
+function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <div className="rounded-[14px] bg-[color-mix(in_oklch,var(--err)_7%,var(--paper-raised))] p-3.5 text-[14px] text-ink ring-1 ring-[color-mix(in_oklch,var(--err)_22%,transparent)]">
+      <p>{message}</p>
+      {onRetry && (
+        <Button size="sm" variant="secondary" className="mt-2.5" onClick={onRetry}>
+          <RefreshCw size={14} /> Try again
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function why(n: Neighborhood, names: Partial<Record<Domain, string>>) {
+  const top = n.drivers.filter((d) => d.share > 0.2).slice(0, 2);
+  const parts: string[] = [];
+  if (top.length) parts.push(`Strongest for ${top.map((d) => d.love || names[d.domain] || DOMAIN_NAME[d.domain]).join(" and ")}.`);
+  if (n.matchedTags.length) parts.push(`Places here feel ${n.matchedTags.slice(0, 3).join(", ").toLowerCase()}.`);
+  return parts.join(" ");
+}
+
+function Ranking() {
+  const ex = useExplore();
+  const pair = !!ex.state.companion && activeLoves(ex.state.companion.loves).length > 0;
+  const { data, loading, error } = ex.hoods;
+  const names = Object.fromEntries(activeLoves(ex.state.loves).map((l) => [l.chosen.domain, l.chosen.name]));
+  if (error && !data) return <ErrorNote message={error.message} onRetry={ex.retry} />;
+  if (!data)
+    return (
+      <div className="space-y-2">
+        {[0, 1, 2, 3].map((i) => (
+          <Skeleton key={i} className="h-[86px]" />
+        ))}
+      </div>
+    );
+  if (!data.length)
+    return <p className="text-[14.5px] text-ink-2">We found the taste field but no named neighborhoods in it. Try a larger city nearby.</p>;
+  return (
+    <LayoutGroup>
+      <ol className={`space-y-2 transition-opacity ${loading ? "opacity-60" : ""}`}>
+        {data.map((n) => (
+          <motion.li layout key={n.id} transition={{ type: "spring", stiffness: 380, damping: 34 }}>
+            <button
+              data-testid="neighborhood-row"
+              onClick={() => ex.patch([{ op: "select_neighborhood", id: n.id }])}
+              className={`group w-full rounded-[16px] p-3.5 text-left ring-1 transition-[transform,box-shadow,background-color] duration-150 hover:-translate-y-px hover:shadow-[var(--shadow-raised)] active:scale-[0.99] ${n.rank === 1 ? "bg-[color-mix(in_oklch,var(--you)_7%,var(--paper-raised))] ring-[color-mix(in_oklch,var(--you)_30%,transparent)]" : "bg-paper-raised ring-line"}`}
+            >
+              <div className="flex items-start gap-3">
+                <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${n.rank === 1 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{n.rank}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="truncate text-[17px] font-[620] tracking-[-0.015em] text-ink">{n.name}</span>
+                    <span className="tnum shrink-0 text-[17px] font-[640] text-ink">{Math.round(n.score * 100)}</span>
+                  </div>
+                  {pair && n.them !== undefined && (
+                    <div className="mt-1.5 space-y-1">
+                      {[
+                        ["You", n.you, "var(--you)"],
+                        ["Them", n.them, "var(--them)"],
+                      ].map(([l, v, c]) => (
+                        <div key={l as string} className="flex items-center gap-2 text-[11.5px] text-ink-3">
+                          <span className="w-9">{l as string}</span>
+                          <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-paper-sunk">
+                            <motion.span layout className="block h-full rounded-full" style={{ width: `${(v as number) * 100}%`, background: c as string }} />
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p className="mt-1 text-[13.5px] leading-snug text-ink-2">{why(n, names)}</p>
+                  <p className="mt-1.5 text-[12px] text-ink-3">{VIBE[n.vibe]}</p>
+                </div>
+              </div>
+            </button>
+          </motion.li>
+        ))}
+      </ol>
+    </LayoutGroup>
+  );
+}
+
+function hoursToday(p: Place) {
+  if (!p.hours) return null;
+  const spans = p.hours[WEEKDAYS[new Date().getDay()]];
+  if (!spans) return null;
+  if (!spans.length) return "Closed today";
+  return spans.map((s) => `${s.opens}–${s.closes}`).join(", ");
+}
+
+function PlaceCard({ p }: { p: Place }) {
+  const ex = useExplore();
+  const active = ex.activePlace === p.id;
+  const h = hoursToday(p);
+  return (
+    <motion.article
+      layout
+      data-testid="place-card"
+      onMouseEnter={() => ex.setActivePlace(p.id)}
+      onMouseLeave={() => ex.setActivePlace(null)}
+      className={`flex gap-3 rounded-[16px] bg-paper-raised p-2.5 ring-1 transition-shadow ${active ? "shadow-[var(--shadow-raised)] ring-ink/30" : "ring-line"}`}
+    >
+      {p.image ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={p.image} alt="" className="h-[84px] w-[84px] shrink-0 rounded-[11px] object-cover" loading="lazy" />
+      ) : (
+        <div className="grid h-[84px] w-[84px] shrink-0 place-items-center rounded-[11px] bg-paper-sunk text-[12px] text-ink-3">{CAT[p.category]}</div>
+      )}
+      <div className="min-w-0 flex-1 py-0.5">
+        <div className="flex items-baseline justify-between gap-2">
+          <h4 className="truncate text-[15px] font-[600] tracking-[-0.01em] text-ink">{p.name}</h4>
+          <span className="tnum shrink-0 text-[13px] font-[600] text-you-deep">{Math.round(p.affinity * 100)}</span>
+        </div>
+        {p.why.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {p.why.slice(0, 3).map((w) => (
+              <span key={w} className="rounded-[6px] bg-you-soft px-1.5 py-0.5 text-[11.5px] font-[520] text-you-deep">
+                {w}
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="mt-1.5 flex items-center gap-3 text-[12px] text-ink-3">
+          {h && (
+            <span className="flex items-center gap-1">
+              <Clock size={12} /> {h}
+            </span>
+          )}
+          <a href={p.mapsUrl} target="_blank" rel="noreferrer" className="flex items-center gap-1 font-[550] text-ink-2 underline-offset-2 hover:text-ink hover:underline">
+            <MapPin size={12} /> Open in Maps
+          </a>
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+function Detail({ n }: { n: Neighborhood }) {
+  const ex = useExplore();
+  const counts = Object.fromEntries((Object.keys(CAT) as Category[]).map((c) => [c, new Set((ex.places.data ?? []).filter((p) => p.category === c).map((p) => p.id)).size]));
+  const opts = [{ value: "all" as const, label: "All" }, ...(Object.keys(CAT) as Category[]).filter((c) => counts[c]).map((c) => ({ value: c, label: CAT[c] }))];
+  return (
+    <div>
+      <button onClick={() => ex.patch([{ op: "select_neighborhood", id: null }])} className="mb-2 flex items-center gap-1 text-[13px] font-[550] text-ink-2 hover:text-ink">
+        <ArrowLeft size={15} /> All neighborhoods
+      </button>
+      <div className="mb-3 flex items-end justify-between gap-3">
+        <div>
+          <h3 className="text-[28px] font-[680] leading-none tracking-[-0.03em]">{n.name}</h3>
+          <p className="mt-1.5 text-[13.5px] text-ink-2">
+            Ranked {n.rank} of {ex.hoods.data?.length ?? n.rank} for your taste. {VIBE[n.vibe]}.
+          </p>
+        </div>
+        <span className="tnum text-[34px] font-[680] leading-none tracking-[-0.03em] text-you">{Math.round(n.score * 100)}</span>
+      </div>
+      <PlanButton />
+      <div className="mb-3 mt-4">
+        {opts.length > 2 && <Segmented size="sm" label="Category" value={ex.category} onChange={(v) => ex.setCategory(v)} options={opts} />}
+      </div>
+      {ex.places.error && <ErrorNote message={ex.places.error.message} onRetry={ex.retry} />}
+      {ex.places.loading && !ex.places.data && (
+        <div className="space-y-2">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-[104px]" />
+          ))}
+        </div>
+      )}
+      {ex.places.data && !ex.visiblePlaces.length && <p className="text-[14px] text-ink-2">Nothing in this category matched your taste nearby.</p>}
+      <div className="space-y-2">
+        {ex.visiblePlaces.map((p) => (
+          <PlaceCard key={`${p.id}-${p.category}`} p={p} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlanButton() {
+  const ex = useExplore();
+  return (
+    <div className="flex items-center gap-2">
+      <Button variant="primary" size="md" onClick={() => void ex.makePlan()} disabled={ex.plan.loading} className="flex-1">
+        {ex.plan.loading ? <Spinner size={15} /> : <CalendarPlus size={16} strokeWidth={1.9} />}
+        {ex.plan.data ? "Plan again" : "Plan my first days"}
+      </Button>
+      <span className="text-[13px] font-[550] text-ink-3">Days</span>
+      <Segmented
+        size="sm"
+        label="Days"
+        value={String(ex.state.days) as "1" | "2" | "3"}
+        onChange={(v) => ex.patch([{ op: "set_days", days: Number(v) as 1 | 2 | 3 }])}
+        options={[
+          { value: "1", label: "1" },
+          { value: "2", label: "2" },
+          { value: "3", label: "3" },
+        ]}
+      />
+    </div>
+  );
+}
+
+function PlanView() {
+  const ex = useExplore();
+  const [copied, setCopied] = useState(false);
+  const plan = ex.plan.data;
+  if (ex.plan.error) return <ErrorNote message={ex.plan.error.message} onRetry={() => void ex.makePlan()} />;
+  if (!plan) return null;
+  return (
+    <div className="mt-5">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-[20px] font-[650] tracking-[-0.02em]">Your first {plan.days.length > 1 ? `${plan.days.length} days` : "day"}</h3>
+        <div className="flex gap-1">
+          <Button size="sm" variant="quiet" onClick={() => download(`homing-${ex.state.city.toLowerCase().replace(/\s+/g, "-")}.ics`, itineraryToIcs(plan, ex.state.city), "text/calendar")}>
+            <CalendarPlus size={14} /> Calendar
+          </Button>
+          <Button
+            size="sm"
+            variant="quiet"
+            onClick={async () => {
+              await navigator.clipboard.writeText(itineraryToText(plan, ex.state.city));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1600);
+            }}
+          >
+            <Copy size={14} /> {copied ? "Copied" : "Copy"}
+          </Button>
+        </div>
+      </div>
+      <div className="space-y-5">
+        {plan.days.map((d, di) => (
+          <section key={di}>
+            <p className="mb-2 text-[13px] font-[600] text-ink-2">
+              Day {di + 1}
+              {d.weekday ? `, ${d.weekday[0].toUpperCase()}${d.weekday.slice(1)}` : ""} in {d.neighborhood}
+            </p>
+            <ol className="relative ml-[22px] border-l-2 border-dashed border-line-strong pl-5">
+              {d.stops.map((s, si) => (
+                <motion.li
+                  data-testid="plan-stop"
+                  key={si}
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.12 * (si + di * d.stops.length), duration: 0.35, ease: [0.2, 0.8, 0.2, 1] }}
+                  className="relative pb-4 last:pb-0"
+                  onMouseEnter={() => ex.setActivePlace(s.place.id)}
+                  onMouseLeave={() => ex.setActivePlace(null)}
+                >
+                  <span className="absolute -left-[31px] top-0.5 grid h-5 w-5 place-items-center rounded-full bg-paper-raised ring-2 ring-ink">
+                    <span className="h-1.5 w-1.5 rounded-full bg-you" />
+                  </span>
+                  {s.walkMin > 0 && (
+                    <span className="mb-1 flex items-center gap-1 text-[11.5px] text-ink-3">
+                      <Footprints size={12} /> {s.walkMin} min walk
+                    </span>
+                  )}
+                  <div className="flex items-baseline gap-2.5">
+                    <span className="tnum w-11 shrink-0 text-[14px] font-[620] text-ink">{s.time}</span>
+                    <div className="min-w-0">
+                      <p className="truncate text-[15px] font-[580] text-ink">{s.place.name}</p>
+                      <p className="text-[12.5px] text-ink-3">
+                        {s.slot}
+                        {s.hoursNote === "hours not listed" ? ", hours not listed" : ""}
+                      </p>
+                    </div>
+                  </div>
+                </motion.li>
+              ))}
+            </ol>
+            {d.missing.length > 0 && <p className="mt-2 text-[12.5px] text-ink-3">Nothing open nearby for: {d.missing.join(", ").toLowerCase()}.</p>}
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function ResultsPanel() {
+  const ex = useExplore();
+  const n = ex.selected;
+  const hasLoves = activeLoves(ex.state.loves).length > 0;
+  const fieldErr = ex.field.error;
+  return (
+    <div className="h-full overflow-y-auto overscroll-contain px-5 pb-6 pt-5">
+      {!hasLoves ? (
+        <div className="pt-1">
+          <h2 className="text-[22px] font-[650] leading-tight tracking-[-0.02em]">Where you&apos;ll fit in</h2>
+          <p className="mt-2 text-[14.5px] leading-relaxed text-ink-2">
+            Add a few things you love. Homing looks them up in Qloo&apos;s taste graph, maps where people who love the same things gather in {ex.state.city}, and ranks the neighborhoods for you.
+          </p>
+        </div>
+      ) : fieldErr && !ex.field.data ? (
+        <ErrorNote message={fieldErr.message} onRetry={fieldErr.retryable ? ex.retry : undefined} />
+      ) : (
+        <AnimatePresence mode="wait" initial={false}>
+          {n ? (
+            <motion.div key={`d-${n.id}`} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 24 }} transition={{ duration: 0.28, ease: [0.2, 0.8, 0.2, 1] }}>
+              <Detail n={n} />
+              <PlanView />
+            </motion.div>
+          ) : (
+            <motion.div key="rank" initial={{ opacity: 0, x: -24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }} transition={{ duration: 0.28, ease: [0.2, 0.8, 0.2, 1] }}>
+              <div className="mb-3 flex items-baseline justify-between">
+                <h2 className="text-[22px] font-[650] leading-tight tracking-[-0.02em]">Your neighborhoods</h2>
+                {ex.hoods.loading && <Spinner size={15} className="text-ink-3" />}
+              </div>
+              {ex.field.data?.sparse && (
+                <p className="mb-3 text-[13.5px] leading-snug text-ink-2">Qloo has thin taste data for {ex.state.city}, so this ranking rests on fewer signals than usual.</p>
+              )}
+              <Ranking />
+              {ex.hoods.data && ex.hoods.data.length > 0 && (
+                <div className="mt-4">
+                  <PlanButton />
+                  <PlanView />
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      )}
+    </div>
+  );
+}

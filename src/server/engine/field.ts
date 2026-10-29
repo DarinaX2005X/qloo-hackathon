@@ -1,10 +1,15 @@
-import { activeLoves, DOMAINS, type Domain, type ExploreState, type ResolvedLove, type TasteField, apiError } from "@/shared/contracts";
+﻿import { activeLoves, DOMAINS, type Domain, type ExploreState, type ResolvedLove, type TasteField, apiError } from "@/shared/contracts";
 import { qlooGet, record, resultRows, string, number, unit, type QlooRecord } from "@/server/qloo/client";
+import { qlooDomain } from "@/server/qloo/domains";
 import { signals } from "./signals";
-import { mean } from "./geo";
+import { focusRadius, haversine, mean, percentileRanks } from "./geo";
+import { cityCenter } from "./city";
 
 export type HeatCell = { h: string; lat: number; lon: number; affinity: number; popularity: number; affinities: Partial<Record<Domain, number>> };
-export type PersonField = { cells: Map<string, { cell: HeatCell; score: number; drivers: Record<string, number> }>; missing: string[] };
+export type LoveMap = { love: ReturnType<typeof activeLoves>[number]; cells: HeatCell[] };
+export type LoveSeries = { love: LoveMap["love"]; values: Map<string, number> };
+export type PersonMaps = { combined: HeatCell[]; individual: LoveMap[] };
+export type PersonField = { scores: Map<string, number>; drivers: Map<string, Record<string, number>>; missing: string[] };
 
 export function heatCell(row: QlooRecord): HeatCell | null {
   const location = record(row.location);
@@ -15,7 +20,7 @@ export function heatCell(row: QlooRecord): HeatCell | null {
   if (!h || h.length !== 6 || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
   const affinities: HeatCell["affinities"] = {};
   for (const domain of DOMAINS) {
-    const value = query[`entity_${domain}_affinity`];
+    const value = query[`entity_${qlooDomain(domain)}_affinity`] ?? query[`entity_${domain}_affinity`];
     if (typeof value === "number" && Number.isFinite(value)) affinities[domain] = unit(value);
   }
   return { h, lat, lon, affinity: unit(query.affinity), popularity: unit(query.popularity), affinities };
@@ -30,75 +35,98 @@ export async function heatmap(city: string, loves: ResolvedLove[], tagId?: strin
   return resultRows(response, "heatmap").map(heatCell).filter((cell): cell is HeatCell => cell !== null);
 }
 
-/** Domain weights aggregate the weights of active loves in that domain. */
-export function weightedCell(cell: HeatCell, loves: ResolvedLove[]): { score: number; drivers: Record<string, number> } {
-  const weights = new Map<Domain, number>();
-  for (const love of activeLoves(loves)) weights.set(love.chosen.domain, (weights.get(love.chosen.domain) ?? 0) + love.weight);
-  let denominator = 0;
-  const contributions: Record<string, number> = {};
-  for (const [domain, weight] of weights) {
-    const affinity = cell.affinities[domain];
-    if (affinity === undefined) continue;
-    denominator += weight;
-    contributions[domain] = weight * affinity;
-  }
-  const total = Object.values(contributions).reduce((sum, n) => sum + n, 0);
-  return { score: denominator ? total / denominator : cell.affinity,
-    drivers: Object.fromEntries(Object.entries(contributions).map(([domain, n]) => [domain, total ? n / total : 0])) };
+export async function loadLoveMaps(city: string, loves: ResolvedLove[]): Promise<LoveMap[]> {
+  return Promise.all(activeLoves(loves).map(async (love) => ({ love, cells: await heatmap(city, [love]) })));
 }
 
-export async function personField(state: ExploreState, loves: ResolvedLove[], tags: HeatCell[][]): Promise<PersonField> {
-  const base = await heatmap(state.city, loves);
-  // Probe only domains not represented in the combined response; never infer no-geo from popularity.
-  const uncertain = activeLoves(loves).filter((love) => !base.some((cell) => (cell.affinities[love.chosen.domain] ?? 0) > 0));
-  const checks = await Promise.all(uncertain.map(async (love) => ({ love, cells: await heatmap(state.city, [love]) })));
-  const missing = checks.filter(({ cells }) => !cells.some((cell) => cell.affinity > 0)).map(({ love }) => love.query);
-  const usable = loves.filter((love) => !missing.includes(love.query));
-  const bases = new Map(base.map((cell) => [cell.h, cell]));
-  // A mixed Qloo query can be empty even when an individual signal is usable.
-  if (!base.length) for (const { cells } of checks) for (const cell of cells) bases.set(cell.h, cell);
-  const tagMaps = tags.filter((cells) => cells.length).map((cells) => new Map(cells.map((cell) => [cell.h, cell])));
-  const all = new Map(bases);
-  for (const map of tagMaps) for (const [h, cell] of map) if (!all.has(h)) all.set(h, cell);
-  const cells: PersonField["cells"] = new Map();
-  let max = 0;
-  for (const [h, cell] of all) {
-    const weighted = bases.has(h) ? weightedCell(bases.get(h)!, usable) : { score: 0, drivers: {} };
-    const tagAffinity = mean(tagMaps.map((map) => map.get(h)?.affinity ?? 0));
-    const refined = tagMaps.length ? (bases.size ? 0.65 * weighted.score + 0.35 * tagAffinity : tagAffinity) : weighted.score;
-    const score = refined * (1 - 0.7 * state.discovery * cell.popularity);
-    cells.set(h, { cell, score, drivers: weighted.drivers });
-    max = Math.max(max, score);
+export async function loadPersonMaps(city: string, loves: ResolvedLove[]): Promise<PersonMaps> {
+  const [combined, individual] = await Promise.all([heatmap(city, loves), loadLoveMaps(city, loves)]);
+  return { combined, individual };
+}
+
+/** Rank only observed cells in the city window. Missing observations retain zero support. */
+export function localPercentiles(cells: HeatCell[], retained: Set<string>): Map<string, number> {
+  const local = [...new Map(cells.filter((cell) => retained.has(cell.h)).map((cell) => [cell.h, cell])).values()];
+  const ranks = percentileRanks(local.map((cell) => cell.affinity));
+  return new Map(local.map((cell, i) => [cell.h, cell.affinity > 0 ? ranks[i] : 0]));
+}
+
+export function loveSeries(maps: LoveMap[], retained: Set<string>): LoveSeries[] {
+  return maps.map(({ love, cells }) => ({ love, values: localPercentiles(cells, retained) }))
+    .filter((series) => [...series.values.values()].some((value) => value > 0));
+}
+
+/** Preserve the combined Qloo signal and apply domain weights before local ranking. */
+export function weightedAffinity(cell: HeatCell, loves: ResolvedLove[]): number {
+  let weighted = 0;
+  let weights = 0;
+  for (const love of activeLoves(loves)) {
+    const value = cell.affinities[love.chosen.domain];
+    if (value === undefined) continue;
+    weighted += love.weight * value;
+    weights += love.weight;
   }
-  if (max) for (const item of cells.values()) item.score /= max;
-  return { cells, missing };
+  return weights ? weighted / weights : cell.affinity;
+}
+
+export function personField(state: ExploreState, maps: PersonMaps, tags: Map<string, number>[], cells: HeatCell[]): PersonField {
+  const retained = new Set(cells.map((cell) => cell.h));
+  const series = loveSeries(maps.individual, retained);
+  const weight = series.reduce((sum, item) => sum + item.love.weight, 0);
+  const contributions = cells.map((cell) => series.map((item) => ({
+    domain: item.love.chosen.domain, value: item.love.weight * (item.values.get(cell.h) ?? 0),
+  })));
+  const combined = new Map(maps.combined.map((cell) => [cell.h, cell]));
+  const rawIndividual = maps.individual.map((item) => ({ love: item.love, cells: new Map(item.cells.map((cell) => [cell.h, cell])) }));
+  const mixtures = cells.map((cell) => {
+    if (!series.length) return 0;
+    const aggregate = combined.get(cell.h);
+    if (aggregate) return weightedAffinity(aggregate, series.map((item) => item.love));
+    return weight ? rawIndividual.reduce((sum, item) => sum + item.love.weight * (item.cells.get(cell.h)?.affinity ?? 0), 0) / weight : 0;
+  });
+  const supported = mixtures.flatMap((value, index) => value > 0 ? [{ value, index }] : []);
+  const ranks = percentileRanks(supported.map((item) => item.value));
+  const base = new Map(supported.map((item, i) => [item.index, ranks[i]]));
+  const scores = new Map<string, number>();
+  const drivers: PersonField["drivers"] = new Map();
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
+    const byDomain: Record<string, number> = {};
+    for (const item of contributions[i]) byDomain[item.domain] = (byDomain[item.domain] ?? 0) + item.value;
+    const total = Object.values(byDomain).reduce((sum, value) => sum + value, 0);
+    drivers.set(cell.h, Object.fromEntries(Object.entries(byDomain).filter(([, value]) => value > 0).map(([domain, value]) => [domain, value / total])));
+    const affinity = base.get(i) ?? 0;
+    const refined = tags.length ? (series.length ? 0.65 * affinity : 0) + (series.length ? 0.35 : 1) * mean(tags.map((tag) => tag.get(cell.h) ?? 0)) : affinity;
+    scores.set(cell.h, refined * (1 - 0.7 * state.discovery * cell.popularity));
+  }
+  const max = Math.max(0, ...scores.values());
+  if (max) for (const [h, score] of scores) scores.set(h, score / max);
+  return { scores, drivers, missing: maps.individual.filter(({ cells }) => !cells.some((cell) => cell.affinity > 0)).map(({ love }) => love.query) };
 }
 
 export async function buildField(state: ExploreState): Promise<TasteField> {
-  const tags = await Promise.all(state.refinements.map((tag) => heatmap(state.city, [], tag.id)));
-  const [you, them] = await Promise.all([
-    personField(state, state.loves, tags),
-    state.companion ? personField(state, state.companion.loves, tags) : undefined,
+  const [center, yours, theirs, tagMaps] = await Promise.all([
+    cityCenter(state.city), loadPersonMaps(state.city, state.loves),
+    state.companion ? loadPersonMaps(state.city, state.companion.loves) : undefined,
+    Promise.all(state.refinements.map((tag) => heatmap(state.city, [], tag.id))),
   ]);
-  const hashes = new Set([...you.cells.keys(), ...(them?.cells.keys() ?? [])]);
-  const cells = [...hashes].sort().map((h) => {
-    const yours = you.cells.get(h);
-    const theirs = them?.cells.get(h);
-    const cell = (yours ?? theirs)!.cell;
-    return { h, lat: cell.lat, lon: cell.lon, you: yours?.score ?? 0,
-      ...(them ? { them: theirs?.score ?? 0, both: Math.min(yours?.score ?? 0, theirs?.score ?? 0) } : {}),
-      popularity: cell.popularity, drivers: yours?.drivers ?? {} };
-  });
-  const nonzero = cells.filter((cell) => cell.you > 0 || (cell.them ?? 0) > 0);
-  if (!nonzero.length) throw apiError("not_found", `No geographic taste signal found for ${state.city}. Try other loves or a place refinement.`);
-  const sorted = [...nonzero].sort((a, b) => (b.both ?? b.you) - (a.both ?? a.you));
-  const top = sorted.slice(0, Math.max(1, Math.ceil(sorted.length * 0.2)));
-  const scores = top.map((cell) => cell.both ?? cell.you);
-  const sum = scores.reduce((a, b) => a + b, 0);
-  const center: [number, number] = sum
-    ? [top.reduce((n, cell, i) => n + cell.lon * scores[i], 0) / sum, top.reduce((n, cell, i) => n + cell.lat * scores[i], 0) / sum]
-    : [mean(top.map((cell) => cell.lon)), mean(top.map((cell) => cell.lat))];
+  // Combined maps supply shared coordinates/popularity; individual maps extend sparse coverage.
+  const all = new Map<string, HeatCell>();
+  for (const map of [yours.combined, theirs?.combined ?? [], ...yours.individual.map((item) => item.cells),
+    ...(theirs?.individual.map((item) => item.cells) ?? []), ...tagMaps])
+    for (const cell of map) if (!all.has(cell.h)) all.set(cell.h, cell);
+  const radius = focusRadius(center, [...all.values()]);
+  const local = [...all.values()].filter((cell) => haversine(center, [cell.lon, cell.lat]) <= radius).sort((a, b) => a.h.localeCompare(b.h));
+  const retained = new Set(local.map((cell) => cell.h));
+  const tags = tagMaps.map((map) => localPercentiles(map, retained)).filter((map) => [...map.values()].some((value) => value > 0));
+  const you = personField(state, yours, tags, local);
+  const them = theirs ? personField(state, theirs, tags, local) : undefined;
+  const cells = local.map((cell) => ({ h: cell.h, lat: cell.lat, lon: cell.lon, you: you.scores.get(cell.h) ?? 0,
+    ...(them ? { them: them.scores.get(cell.h) ?? 0, both: Math.min(you.scores.get(cell.h) ?? 0, them.scores.get(cell.h) ?? 0) } : {}),
+    popularity: cell.popularity, drivers: you.drivers.get(cell.h) ?? {} }));
+  if (!cells.some((cell) => cell.you > 0 || (cell.them ?? 0) > 0))
+    throw apiError("not_found", `No geographic taste signal found near ${state.city}. Try other loves or a place refinement.`);
   return { city: state.city, center,
-    bbox: [Math.min(...nonzero.map((cell) => cell.lon)), Math.min(...nonzero.map((cell) => cell.lat)), Math.max(...nonzero.map((cell) => cell.lon)), Math.max(...nonzero.map((cell) => cell.lat))],
+    bbox: [Math.min(...cells.map((cell) => cell.lon)), Math.min(...cells.map((cell) => cell.lat)), Math.max(...cells.map((cell) => cell.lon)), Math.max(...cells.map((cell) => cell.lat))],
     cells, sparse: cells.length < 40, signalsWithoutGeo: [...new Set([...you.missing, ...(them?.missing ?? [])])] };
 }

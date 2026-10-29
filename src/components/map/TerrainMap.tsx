@@ -81,6 +81,8 @@ export function TerrainMap({
           interactive: variant === "work",
           maxPitch: 70,
           fadeDuration: 0,
+          // keeps the last frame readable for screenshots and screen recording
+          canvasContextAttributes: { preserveDrawingBuffer: true, antialias: true },
         });
         mapRef.current = map;
         if (process.env.NODE_ENV !== "production") (window as unknown as { __map: MLMap }).__map = map;
@@ -173,7 +175,8 @@ export function TerrainMap({
     const prev = prevHeights.current;
     const isRise = prev.size === 0;
     const next = new Map<string, number>();
-    const scale = variant === "hero" ? 1.15 : 1;
+    // inside a neighborhood the terrain lies down into a low carpet so places and streets stay readable
+    const scale = (variant === "hero" ? 1.15 : 1) * (selectedId ? 0.1 : 1);
     for (const f of hexes.features) {
       const h1 = heightOf(f.properties.v, scale);
       next.set(f.properties.id, h1);
@@ -198,7 +201,8 @@ export function TerrainMap({
       else map.setPaintProperty(LAYER, "fill-extrusion-height", ["get", "h1"]);
     };
     anim.current = requestAnimationFrame(tick);
-  }, [hexes, ready, variant]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hexes, ready, variant, !!selectedId]);
 
   // --- camera: frame the strongest part of the field once per city
   useEffect(() => {
@@ -244,10 +248,29 @@ export function TerrainMap({
       node.innerHTML = `<span class="hm-plate-rank">${n.rank}</span><span class="hm-plate-name"></span>`;
       (node.querySelector(".hm-plate-name") as HTMLElement).textContent = n.name;
       node.setAttribute("aria-label", `${n.rank}. ${n.name}`);
+      node.style.zIndex = String(n.id === selectedId ? 100 : 50 - n.rank);
       if (variant === "work") node.addEventListener("click", () => onSelectNeighborhood?.(n.id === selectedId ? null : n.id));
       else node.tabIndex = -1;
       return new maplibregl.Marker({ element: node, anchor: "bottom", offset: [0, -6] }).setLngLat(n.center).addTo(map);
     });
+    // Plates are placed in rank order; a plate that would overlap a better-ranked one collapses to its number.
+    const declutter = () => {
+      const kept: DOMRect[] = [];
+      markers.current.forEach((m, i) => {
+        const node = m.getElement();
+        const n = neighborhoods[i];
+        node.classList.remove("is-collapsed");
+        const r = node.getBoundingClientRect();
+        const hit = kept.some((k) => r.left < k.right + 4 && r.right > k.left - 4 && r.top < k.bottom + 2 && r.bottom > k.top - 2);
+        if (hit && n.id !== selectedId) node.classList.add("is-collapsed");
+        kept.push(node.getBoundingClientRect());
+      });
+    };
+    declutter();
+    map.on("moveend", declutter);
+    return () => {
+      map.off("moveend", declutter);
+    };
   }, [neighborhoods, selectedId, ready, variant, onSelectNeighborhood]);
 
   // --- fly to the selected neighborhood, dim the rest of the terrain
@@ -257,7 +280,7 @@ export function TerrainMap({
     const sel = neighborhoods.find((n) => n.id === selectedId);
     if (sel) {
       map.flyTo({ center: sel.center, zoom: 14.2, pitch: 56, duration: 1300, padding, essential: true });
-      map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.55);
+      map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.42);
     } else {
       map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.94);
     }
@@ -295,7 +318,7 @@ export function TerrainMap({
   }, [route, ready]);
 
   return (
-    <div className={`relative h-full w-full overflow-hidden ${className ?? ""}`}>
+    <div className={`relative isolate h-full w-full overflow-hidden ${className ?? ""}`}>
       <div ref={el} style={{ position: "absolute", inset: 0 }} />
       {failed && (
         <div className="absolute inset-0 grid place-items-center bg-paper-sunk text-ink-2">

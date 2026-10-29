@@ -1,14 +1,16 @@
 import { Domain, type EntityRef, type TagRef, apiError } from "@/shared/contracts";
 import { qlooGet, record, resultRows, string, unit, type QlooRecord } from "./client";
+import { qlooDomain } from "./domains";
 
-const priority: Domain[] = ["artist", "movie", "tv_show", "book", "person", "author", "brand", "place", "podcast", "video_game", "destination"];
+const priority: Domain[] = ["artist", "movie", "tv_show", "book", "person", "brand", "place", "podcast", "video_game", "destination", "author"];
 
 export function entityRef(row: QlooRecord, domain?: Domain): EntityRef | null {
   const id = string(row.entity_id) ?? string(row.id);
   const name = string(row.name);
-  const types = Array.isArray(row.types) ? row.types : [row.subtype, row.type];
-  const selected = domain && types.includes(`urn:entity:${domain}`) ? domain : priority.find((d) => types.includes(`urn:entity:${d}`));
-  if (!id || !name || !selected || (domain && domain !== selected)) return null;
+  const rawTypes = Array.isArray(row.types) ? row.types : [row.subtype, row.type];
+  const types = rawTypes.map((type) => type === "urn:entity:videogame" ? "urn:entity:video_game" : type);
+  const selected = domain && domain !== "author" && types.includes(`urn:entity:${domain}`) ? domain : priority.find((d) => types.includes(`urn:entity:${d}`));
+  if (!id || !name || !selected || (domain && !types.includes(`urn:entity:${domain}`))) return null;
   const properties = record(row.properties);
   return { id, name, domain: selected, image: string(record(properties.image).url),
     subtitle: (string(properties.short_description) ?? string(row.short_description))?.slice(0, 90),
@@ -26,11 +28,27 @@ export function searchQuery(q: string): string {
   return q.trim();
 }
 
+/** Search can return the same id once per type, rather than one row with all types. */
+export function mergeEntityRows(rows: QlooRecord[]): QlooRecord[] {
+  const merged = new Map<string, QlooRecord>();
+  for (const row of rows) {
+    const id = string(row.entity_id) ?? string(row.id);
+    if (!id) continue;
+    const previous = merged.get(id);
+    const types = Array.isArray(row.types) ? row.types : [row.subtype, row.type];
+    merged.set(id, { ...previous, ...row,
+      properties: { ...record(previous?.properties), ...record(row.properties) },
+      types: [...new Set([...(Array.isArray(previous?.types) ? previous.types : []), ...types])],
+    });
+  }
+  return [...merged.values()];
+}
+
 export async function searchEntities(q: string, domain?: Domain): Promise<EntityRef[]> {
   if (domain !== undefined && !Domain.safeParse(domain).success) throw apiError("bad_input", "Unknown entity domain.");
-  const response = await qlooGet("/search", { query: searchQuery(q), types: domain ? `urn:entity:${domain}` : undefined, take: 6 });
+  const response = await qlooGet("/search", { query: searchQuery(q), types: domain ? `urn:entity:${qlooDomain(domain)}` : undefined, take: 6 });
   const found = new Map<string, EntityRef>();
-  for (const row of resultRows(response, "entities")) {
+  for (const row of mergeEntityRows(resultRows(response, "entities"))) {
     const entity = entityRef(row, domain);
     if (entity && !found.has(entity.id)) found.set(entity.id, entity);
   }

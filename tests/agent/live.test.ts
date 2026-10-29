@@ -55,7 +55,7 @@ describe.skipIf(process.env.QLOO_LIVE !== "1")("live agent and intake", () => {
     expect(result.discovery).toBeGreaterThanOrEqual(0.7);
     expect(events.findIndex((e) => e.type === "patch")).toBeLessThan(events.findIndex((e) => e.type === "delta"));
     console.info("Live settings:", { days: result.days, discovery: result.discovery, tools: events.filter((e) => e.type === "trace").length });
-  }, 45_000);
+  }, 60_000);
 
   it("looks up partner tastes and cafe tags before applying changes", async () => {
     const events: AgentEvent[] = [];
@@ -77,7 +77,7 @@ describe.skipIf(process.env.QLOO_LIVE !== "1")("live agent and intake", () => {
     expect(events.some((e) => e.type === "trace" && e.tool === "search_place_tags")).toBe(true);
     expect(events.at(-1)).toEqual({ type: "done" });
     console.info("Live partner/cafes:", { partnerLoves: result.companion?.loves.length, refinements: result.refinements.map((t) => t.name), tools: events.filter((e) => e.type === "trace").length });
-  }, 45_000);
+  }, 60_000);
 
   it("connects an intake profile to the real field and ranking engine", async () => {
     const intake = await extractTastes({ text: "I love Radiohead, moving to Lisbon" });

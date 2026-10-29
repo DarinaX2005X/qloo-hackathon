@@ -1,7 +1,6 @@
 import { CATEGORIES, type Category, type ExploreState, type Neighborhood, type Place, type TagRef, apiError } from "@/shared/contracts";
 import { qlooGet, record, records, resultRows, string, number, unit, type QlooRecord } from "@/server/qloo/client";
-import { tagRef } from "@/server/qloo/search";
-import { buildFingerprint } from "./fingerprint";
+import { buildFingerprint, matchedPlaceTags, tagName, usefulExplanation } from "./fingerprint";
 import { coordinates, neighborhoodName, rankNeighborhoods } from "./neighborhoods";
 import { haversine } from "./geo";
 import { signals } from "./signals";
@@ -45,14 +44,21 @@ export function placeFromRow(row: QlooRecord, category: Category, tags: TagRef[]
   const point = coordinates(row);
   const properties = record(row.properties);
   if (!id || !name || !point || properties.is_closed === true) return null;
-  const tagIds = new Set(tags.map((tag) => tag.id));
-  const matched = records(row.tags).map(tagRef).filter((tag) => tag && tagIds.has(tag.id)).map((tag) => tag!.name);
-  const keywords = records(properties.keywords).sort((a, b) => number(b.count) - number(a.count)).map((keyword) => string(keyword.name)).filter((name): name is string => !!name);
+  const matched = matchedPlaceTags([row], tags, false).slice(0, 3);
+  const used = new Set(matched.map(tagName));
+  const keywords: string[] = [];
+  for (const keyword of records(properties.keywords).sort((a, b) => number(b.count) - number(a.count))) {
+    const name = string(keyword.name);
+    if (!name || !usefulExplanation(name) || used.has(tagName(name))) continue;
+    keywords.push(name);
+    used.add(tagName(name));
+    if (keywords.length === 2) break;
+  }
   const address = string(properties.address);
   return { id, name, category, lon: point[0], lat: point[1], affinity: unit(record(row.query).affinity), popularity: unit(row.popularity),
     address, image: string(record(records(properties.images)[0]).url) ?? string(record(properties.image).url),
     hours: openingHours(properties.hours), priceLevel: typeof properties.price_level === "number" ? number(properties.price_level) : undefined,
-    why: [...new Set([...matched, ...keywords])].slice(0, 5), description: string(properties.short_description),
+    why: [...matched, ...keywords].slice(0, 4), description: string(properties.short_description),
     mapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([name, address].filter(Boolean).join(", "))}`,
     neighborhood: neighborhoodName(row) };
 }

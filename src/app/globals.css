@@ -44,7 +44,12 @@ body {
   color: var(--ink);
 }
 
-:focus-visible {
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+:where(a, button, summary, [role="radio"], [role="option"], [tabindex]):focus-visible {
   outline: 2px solid var(--you);
   outline-offset: 2px;
   border-radius: 6px;
@@ -109,3 +114,7 @@ body {
 .hm-plate.is-selected { background: var(--you); color: #fff; }
 .hm-plate.is-selected .hm-plate-rank { background: oklch(100% 0 0 / 0.22); }
 .hm-plate.is-dim { opacity: 0.5; }
+.hm-plate.is-collapsed { padding: 4px; gap: 0; }
+.hm-plate.is-collapsed .hm-plate-name { display: none; }
+.hm-plate.is-collapsed:hover { padding: 5px 10px 5px 5px; gap: 7px; z-index: 5; }
+.hm-plate.is-collapsed:hover .hm-plate-name { display: inline; }
