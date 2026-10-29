@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/logo.svg" width="64" alt="Homing logo" />
+  <img src="docs/logo-badge.svg" width="96" alt="Homing logo" />
 </p>
 
 <h1 align="center">Homing</h1>
