@@ -148,7 +148,7 @@ export function Hero() {
 
           <div className="mt-4 min-h-[48px] text-[14px] text-ink-2">
             {error ? (
-              <p className="text-err">Couldn&apos;t reach the taste graph. Change a chip to try again.</p>
+              <p className="text-ink-2">The taste graph is slow to answer right now. Change a chip or the city to try again.</p>
             ) : top.length ? (
               <p>
                 {loading && <Spinner size={12} className="mr-1.5 inline text-ink-3" />}

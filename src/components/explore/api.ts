@@ -24,7 +24,7 @@ export class HomingError extends Error {
   }
 }
 
-async function call<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
+async function once<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
   const { json, ...rest } = init;
   let res: Response;
   try {
@@ -44,6 +44,23 @@ async function call<T>(path: string, init: RequestInit & { json?: unknown } = {}
     throw new HomingError(err?.code ?? "qloo_unavailable", err?.message ?? "Something went wrong on our side.", err?.retryable ?? true);
   }
   return body as T;
+}
+
+const RETRY_MS = [900, 2400];
+
+/** Retries transient failures (cold start, quota, network) quietly before the person sees an error. */
+async function call<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await once<T>(path, init);
+    } catch (e) {
+      const err = e as HomingError;
+      const transient = err.retryable && (err.code === "network" || err.code === "qloo_unavailable" || err.code === "quota");
+      if (!transient || attempt >= RETRY_MS.length || init.signal?.aborted) throw err;
+      await new Promise((r) => setTimeout(r, RETRY_MS[attempt]));
+      if (init.signal?.aborted) throw new HomingError("aborted", "aborted", false);
+    }
+  }
 }
 
 export const api = {

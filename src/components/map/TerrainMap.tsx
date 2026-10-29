@@ -176,7 +176,7 @@ export function TerrainMap({
     const isRise = prev.size === 0;
     const next = new Map<string, number>();
     // inside a neighborhood the terrain lies down into a low carpet so places and streets stay readable
-    const scale = (variant === "hero" ? 1.15 : 1) * (selectedId ? 0.1 : 1);
+    const scale = (variant === "hero" ? 1.15 : 1) * (selectedId ? 0.04 : 1);
     for (const f of hexes.features) {
       const h1 = heightOf(f.properties.v, scale);
       next.set(f.properties.id, h1);
@@ -280,7 +280,7 @@ export function TerrainMap({
     const sel = neighborhoods.find((n) => n.id === selectedId);
     if (sel) {
       map.flyTo({ center: sel.center, zoom: 14.2, pitch: 56, duration: 1300, padding, essential: true });
-      map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.42);
+      map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.22);
     } else {
       map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.94);
     }

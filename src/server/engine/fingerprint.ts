@@ -11,7 +11,7 @@ export function tagName(name: string): string {
 }
 
 export function usefulExplanation(text: string): boolean {
-  return !/\b(?:payments?|parking|credit cards?|debit cards?|wheelchair|accessib\w*|inclusiv\w*|ratings?|stars?|women.owned|identifies as)\b/i.test(text.replace(/[_:-]/g, " "));
+  return !/\b(?:payments?|parking|credit cards?|debit cards?|wheelchair|accessib\w*|inclusiv\w*|ratings?|stars?|women.owned|identifies as|odou?rs?|unpleasant|dirty|rude|smell\w*|reported|complaints?|unsanitary|overpriced)\b/i.test(text.replace(/[_:-]/g, " "));
 }
 
 export function meaningfulTag(tag: TagRef): boolean {
@@ -46,8 +46,10 @@ export async function fingerprintTags(loves: ResolvedLove[], refinements: TagRef
     "filter.type": "urn:tag", "filter.tag.types": type, ...signals(loves, refinements), take: 50,
   }), "tags") })));
   const found = new Map<string, TagRef>();
-  const rows = responses.flatMap(({ type, rows }) => rows.filter((row) => tagRef(row)?.id.startsWith(`${type}:`)))
+  const all = responses.flatMap(({ type, rows }) => rows.filter((row) => tagRef(row)?.id.startsWith(`${type}:`)))
     .sort((a, b) => unit(record(b.query).affinity) - unit(record(a.query).affinity));
+  const common = all.filter((row) => unit(row.popularity) >= 0.5);
+  const rows = common.length >= 8 ? common : all;
   for (const row of rows) {
     const tag = tagRef(row);
     if (tag && /^(ambience|decor)$/.test(tag.kind) && meaningfulTag(tag) && !found.has(tagName(tag.name)))
@@ -68,8 +70,8 @@ export async function fingerprintTags(loves: ResolvedLove[], refinements: TagRef
 
 export async function buildFingerprint(state: ExploreState): Promise<Fingerprint> {
   const [you, them] = await Promise.all([
-    fingerprintTags(state.loves, state.refinements),
-    state.companion ? fingerprintTags(state.companion.loves, state.refinements) : undefined,
+    fingerprintTags(state.loves),
+    state.companion ? fingerprintTags(state.companion.loves) : undefined,
   ]);
   if (!them) return { you };
   const yours = new Set(you.map((tag) => tagName(tag.name)));
