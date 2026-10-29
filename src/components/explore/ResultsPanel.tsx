@@ -27,19 +27,60 @@ function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void
   );
 }
 
-function why(n: Neighborhood, names: Partial<Record<Domain, string>>) {
-  const top = n.drivers.filter((d) => d.share > 0.2).slice(0, 2);
+/** One ink shade per love, in the order the person added them, so bars read the same in every row. */
+export const LOVE_INKS = [
+  "oklch(55% 0.2 30)",
+  "oklch(72% 0.15 50)",
+  "oklch(40% 0.13 22)",
+  "oklch(82% 0.09 60)",
+  "oklch(63% 0.16 12)",
+  "oklch(50% 0.1 45)",
+  "oklch(75% 0.12 25)",
+  "oklch(33% 0.08 35)",
+];
+
+function why(n: Neighborhood) {
   const parts: string[] = [];
-  if (top.length) parts.push(`Strongest for ${top.map((d) => d.love || names[d.domain] || DOMAIN_NAME[d.domain]).join(" and ")}.`);
-  if (n.matchedTags.length) parts.push(`Places here feel ${n.matchedTags.slice(0, 3).join(", ").toLowerCase()}.`);
+  const top = n.drivers[0];
+  if (top && top.share >= 0.36) parts.push(`${top.love} pulls this one up most.`);
+  else if (n.drivers.length > 1) parts.push("Everything you love lands here evenly.");
+  if (n.matchedTags.length) parts.push(`Places feel ${n.matchedTags.slice(0, 3).join(", ").toLowerCase()}.`);
   return parts.join(" ");
+}
+
+function DriverBar({ n, order }: { n: Neighborhood; order: string[] }) {
+  const segs = order
+    .map((love, i) => ({ love, i, share: n.drivers.find((d) => d.love === love)?.share ?? 0 }))
+    .filter((x) => x.share > 0.01);
+  if (segs.length < 2) return null;
+  return (
+    <div className="mt-2 flex h-1.5 gap-[2px] overflow-hidden rounded-full" aria-label={segs.map((x) => `${x.love} ${Math.round(x.share * 100)}%`).join(", ")}>
+      {segs.map((x) => (
+        <motion.span layout key={x.love} className="h-full first:rounded-l-full last:rounded-r-full" style={{ flexGrow: x.share, background: LOVE_INKS[x.i % LOVE_INKS.length] }} />
+      ))}
+    </div>
+  );
+}
+
+function Legend({ order }: { order: string[] }) {
+  if (order.length < 2) return null;
+  return (
+    <div className="mb-3 flex flex-wrap gap-x-3 gap-y-1 text-[12.5px] text-ink-2">
+      {order.map((l, i) => (
+        <span key={l} className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full" style={{ background: LOVE_INKS[i % LOVE_INKS.length] }} />
+          {l}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function Ranking() {
   const ex = useExplore();
   const pair = !!ex.state.companion && activeLoves(ex.state.companion.loves).length > 0;
   const { data, loading, error } = ex.hoods;
-  const names = Object.fromEntries(activeLoves(ex.state.loves).map((l) => [l.chosen.domain, l.chosen.name]));
+  const order = activeLoves(ex.state.loves).map((l) => l.chosen.name);
   if (error && !data) return <ErrorNote message={error.message} onRetry={ex.retry} />;
   if (!data)
     return (
@@ -53,6 +94,7 @@ function Ranking() {
     return <p className="text-[14.5px] text-ink-2">We found the taste field but no named neighborhoods in it. Try a larger city nearby.</p>;
   return (
     <LayoutGroup>
+      {!pair && <Legend order={order} />}
       <ol className={`space-y-2 transition-opacity ${loading ? "opacity-60" : ""}`}>
         {data.map((n) => (
           <motion.li layout key={n.id} transition={{ type: "spring", stiffness: 380, damping: 34 }}>
@@ -68,6 +110,7 @@ function Ranking() {
                     <span className="truncate text-[17px] font-[620] tracking-[-0.015em] text-ink">{n.name}</span>
                     <span className="tnum shrink-0 text-[17px] font-[640] text-ink">{Math.round(n.score * 100)}</span>
                   </div>
+                  {!pair && <DriverBar n={n} order={order} />}
                   {pair && n.them !== undefined && (
                     <div className="mt-1.5 space-y-1">
                       {[
@@ -83,7 +126,7 @@ function Ranking() {
                       ))}
                     </div>
                   )}
-                  <p className="mt-1 text-[13.5px] leading-snug text-ink-2">{why(n, names)}</p>
+                  <p className="mt-1.5 text-[13.5px] leading-snug text-ink-2">{why(n)}</p>
                   <p className="mt-1.5 text-[12px] text-ink-3">{VIBE[n.vibe]}</p>
                 </div>
               </div>

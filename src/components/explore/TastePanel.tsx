@@ -112,7 +112,7 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 pb-4 pt-5">
+      <div className="hm-scroll min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 pb-4 pt-5">
         <section>
           <h2 className="mb-1 text-[22px] font-[650] leading-tight tracking-[-0.02em]">What you love</h2>
           {!compact && <p className="mb-3 text-[14px] leading-snug text-ink-2">Artists, films, shows, books, brands or places. Mix them, that&apos;s the point.</p>}

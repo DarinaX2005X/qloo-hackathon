@@ -151,7 +151,7 @@ function Workspace() {
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.45, ease: [0.2, 0.8, 0.2, 1] }}
-            className="absolute bottom-4 left-4 top-[76px] z-20 w-[380px] overflow-hidden rounded-[24px] bg-paper-raised/95 shadow-[var(--shadow-overlay)] ring-1 ring-line backdrop-blur"
+            className="absolute left-4 top-[76px] z-20 flex max-h-[calc(100dvh-92px)] w-[380px] flex-col overflow-hidden rounded-[24px] bg-paper-raised/95 shadow-[var(--shadow-overlay)] ring-1 ring-line backdrop-blur"
           >
             <TastePanel />
           </motion.aside>

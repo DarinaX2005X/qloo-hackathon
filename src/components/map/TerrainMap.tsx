@@ -211,13 +211,13 @@ export function TerrainMap({
     const key = field.city.toLowerCase();
     if (fittedFor.current === key) return;
     fittedFor.current = key;
-    const strong = [...focused].sort((a, b) => b.you - a.you).slice(0, Math.max(12, Math.round(field.cells.length * 0.12)));
+    const strong = [...focused].sort((a, b) => Math.max(b.you, b.them ?? 0) - Math.max(a.you, a.them ?? 0)).slice(0, Math.max(8, Math.round(focused.length * 0.09)));
     const lons = strong.map((c) => c.lon), lats = strong.map((c) => c.lat);
     const bounds: [[number, number], [number, number]] = [
       [Math.min(...lons), Math.min(...lats)],
       [Math.max(...lons), Math.max(...lats)],
     ];
-    map.fitBounds(bounds, { padding, pitch: variant === "hero" ? 54 : 48, bearing: -14, duration: 1400, maxZoom: 13.2 });
+    map.fitBounds(bounds, { padding, pitch: variant === "hero" ? 54 : 48, bearing: -14, duration: 1400, maxZoom: 13.6 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [field, ready]);
 
