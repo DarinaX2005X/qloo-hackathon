@@ -2,7 +2,7 @@ import { z } from "zod";
 import { Domain, EntityRef, ExploreState, LIMITS, Neighborhood, ResolvedLove, StatePatch, TagRef } from "@/shared/contracts";
 import { applyPatches } from "@/shared/patches";
 import { searchEntities, searchPlaceTags } from "@/server/qloo";
-import { buildField, rankNeighborhoods } from "@/server/engine";
+import { rankNeighborhoods } from "@/server/engine";
 import { asFailure, fail, withSignal } from "./errors";
 import type { ChatTool } from "./llm";
 import { rankingChanged } from "./final";
@@ -111,8 +111,7 @@ export function validateChanges(ops: StatePatch[], context: ToolContext): void {
 export async function getRanking(context: ToolContext): Promise<Neighborhood[]> {
   if (context.ranking) return context.ranking;
   try {
-    const field = await withSignal(buildField(context.state), context.signal);
-    context.ranking = z.array(Neighborhood).parse(await withSignal(rankNeighborhoods(context.state, field), context.signal)).slice(0, 8);
+    context.ranking = z.array(Neighborhood).parse(await withSignal(rankNeighborhoods(context.state), context.signal)).slice(0, 8);
     return context.ranking;
   } catch (error) { throw asFailure(error, "qloo"); }
 }

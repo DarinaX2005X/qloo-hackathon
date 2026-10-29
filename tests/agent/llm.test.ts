@@ -28,7 +28,13 @@ describe("OpenRouter client", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("https://openrouter.ai/api/v1/chat/completions");
     expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key", "X-Title": "Homing", "HTTP-Referer": expect.any(String) });
-    expect(JSON.parse(String(init?.body))).toMatchObject({ model: "test-model", response_format: { type: "json_object" } });
+    expect(JSON.parse(String(init?.body))).toMatchObject({ model: "test-model", response_format: { type: "json_object" }, reasoning: { effort: "low", exclude: true } });
+  });
+
+  it("forwards output budgets and enables parallel native tool calls", async () => {
+    fetchMock.mockResolvedValue(Response.json({ choices: [{ message: { content: "ok" } }] }));
+    await chat({ messages: [], max_tokens: 120, tools: [{ type: "function", function: { name: "lookup", description: "Lookup", parameters: { type: "object" } } }] });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ max_tokens: 120, parallel_tool_calls: true, reasoning: { effort: "low", exclude: true } });
   });
 
   it("retries a 5xx exactly once", async () => {
