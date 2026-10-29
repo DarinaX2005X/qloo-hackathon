@@ -123,3 +123,4 @@ textarea:focus-visible {
 .hm-scroll::-webkit-scrollbar { width: 8px; }
 .hm-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; border: 2px solid var(--paper-raised); }
 .hm-scroll::-webkit-scrollbar-button { display: none; height: 0; }
+.hm-plate.is-hidden { visibility: hidden; }

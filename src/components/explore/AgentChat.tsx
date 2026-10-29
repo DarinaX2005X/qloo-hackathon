@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/primitives";
 const SUGGESTIONS = ["Less touristy", "I work from cafés", "Only 2 days, near the water", "Add my partner: techno and Succession"];
 
 /** Conversation with the agent. Tool calls show as they happen, and their changes land on the map. */
-export function AgentChat() {
+export function AgentChat({ compact = false }: { compact?: boolean }) {
   const { chat, askAgent, agentBusy } = useExplore();
   const [text, setText] = useState("");
   const list = useRef<HTMLDivElement>(null);
@@ -26,7 +26,7 @@ export function AgentChat() {
   return (
     <div className="border-t border-line bg-paper-raised/70 px-4 pb-4 pt-3">
       {chat.length > 0 && (
-        <div ref={list} className="mb-3 max-h-[34vh] space-y-3 overflow-y-auto overscroll-contain pr-1">
+        <div ref={list} className={`mb-3 overflow-y-auto overscroll-contain pr-1 space-y-3 ${compact ? "max-h-[18vh]" : "max-h-[34vh]"}`}>
           {chat.map((t) =>
             t.role === "user" ? (
               <motion.p
@@ -66,7 +66,7 @@ export function AgentChat() {
       )}
       {chat.length === 0 && (
         <div className="mb-2 flex flex-wrap gap-1">
-          {SUGGESTIONS.map((s) => (
+          {(compact ? SUGGESTIONS.slice(0, 2) : SUGGESTIONS).map((s) => (
             <button
               key={s}
               onClick={() => send(s)}

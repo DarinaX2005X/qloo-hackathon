@@ -259,11 +259,13 @@ export function TerrainMap({
       markers.current.forEach((m, i) => {
         const node = m.getElement();
         const n = neighborhoods[i];
-        node.classList.remove("is-collapsed");
-        const r = node.getBoundingClientRect();
-        const hit = kept.some((k) => r.left < k.right + 4 && r.right > k.left - 4 && r.top < k.bottom + 2 && r.bottom > k.top - 2);
-        if (hit && n.id !== selectedId) node.classList.add("is-collapsed");
-        kept.push(node.getBoundingClientRect());
+        node.classList.remove("is-collapsed", "is-hidden");
+        const overlaps = (r: DOMRect) => kept.some((k) => r.left < k.right + 4 && r.right > k.left - 4 && r.top < k.bottom + 2 && r.bottom > k.top - 2);
+        if (n.id === selectedId || !overlaps(node.getBoundingClientRect())) return void kept.push(node.getBoundingClientRect());
+        node.classList.add("is-collapsed");
+        // still colliding as a bare number: lower ranks step aside, the list keeps them
+        if (overlaps(node.getBoundingClientRect()) && n.rank > 3) node.classList.add("is-hidden");
+        else kept.push(node.getBoundingClientRect());
       });
     };
     declutter();
