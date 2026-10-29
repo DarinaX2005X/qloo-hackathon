@@ -13,7 +13,7 @@ Tell Homing a few things you love. It maps where people with your taste gather i
   <a href="#run-it-locally">Run it locally</a>
 </p>
 
-![Homing: the taste field of a Radiohead, Fleabag and Wes Anderson fan over Lisbon](docs/hero.png)
+![Homing: the taste field of a Radiohead, Fleabag and Wes Anderson fan over Lisbon](docs/hero.jpg)
 
 ## The problem
 
@@ -32,7 +32,11 @@ When you move to a new city, or stay somewhere for a month, the neighborhood dec
 
 | Your taste over Lisbon | A neighborhood, its places and your plan | Two people, two inks |
 | --- | --- | --- |
-| ![](docs/explore.png) | ![](docs/plan.png) | ![](docs/pair.png) |
+| ![](docs/explore.jpg) | ![](docs/plan.jpg) | ![](docs/pair.jpg) |
+
+**The agent at work.** "Less touristy, and I work from cafés" becomes a moved crowd dial and a free wifi requirement, the map re-forms, and every tool call shows up as it happens.
+
+<p align="center"><img src="docs/agent.jpg" width="820" alt="The agent turning a plain request into changes on the map" /></p>
 
 ## Why it only works with Qloo
 

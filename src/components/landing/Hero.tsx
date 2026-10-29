@@ -56,7 +56,7 @@ export function Hero() {
           <LogoMark size={30} />
           <span className="text-[23px] font-[680] tracking-[-0.03em]">homing</span>
         </a>
-        <nav className="flex items-center gap-1 text-[15px]">
+        <nav className="flex items-center gap-1 rounded-[14px] bg-paper/85 p-1 text-[15px] shadow-[var(--shadow-rest)] ring-1 ring-line backdrop-blur">
           <a href="#how" className="hidden rounded-[10px] px-3 py-2 text-ink-2 hover:bg-paper-sunk hover:text-ink sm:block">
             How it works
           </a>
