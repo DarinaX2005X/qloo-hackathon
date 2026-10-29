@@ -9,6 +9,8 @@ import { useExplore } from "./store";
 import { api } from "./api";
 import { Button } from "@/components/ui/primitives";
 import { AgentChat } from "./AgentChat";
+import { TripControls } from "./TripControls";
+import { RecentMaps } from "./RecentMaps";
 
 export const PRESETS: { label: string; city: string; loves: string[] }[] = [
   { label: "A rainy-day reader", city: "Lisbon", loves: ["Haruki Murakami", "Radiohead", "Fleabag", "Wes Anderson"] },
@@ -35,6 +37,7 @@ function Chips({ who }: { who: "you" | "them" }) {
             onRemove={() => ex.updateLove(who, l.query, () => null)}
             onWeight={(w) => ex.updateLove(who, l.query, (x) => ({ ...x, weight: w }))}
             onChoose={(id) => ex.updateLove(who, l.query, (x) => ({ ...x, chosen: x.candidates.find((c) => c.id === id) ?? x.chosen }))}
+            onOpen={() => ex.loadCandidates(who, l.query)}
           />
         ))}
         {pending.map((q) => (
@@ -154,11 +157,14 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
                   </button>
                 ))}
               </div>
+              <RecentMaps />
             </div>
           )}
         </section>
 
         <Fingerprint />
+
+        {ex.state.loves.length > 0 && <TripControls />}
 
         <section>
           <AnimatePresence initial={false} mode="popLayout">

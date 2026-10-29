@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type {
   AgentEvent,
   Category,
+  CityScore,
   ExploreState,
   Fingerprint,
   Itinerary,
@@ -32,6 +33,7 @@ export type ChatTurn = {
 };
 
 type Pending = Record<string, true>; // queries being looked up
+export type Toast = { id: number; text: string; undo?: () => void };
 
 const RECENT_KEY = "homing.recent";
 
@@ -59,8 +61,26 @@ function useStore() {
   const [category, setCategory] = useState<Category | "all">("all");
   const [activePlace, setActivePlace] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0); // bump to retry
+  const [exclude, setExclude] = useState<string[]>([]);
+  const [include, setInclude] = useState<string[]>([]);
+  const [saved, setSaved] = useState<Place[]>([]);
+  const [openPlace, setOpenPlace] = useState<Place | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const [compare, setCompare] = useState<string[]>([]);
+  const [cities, setCities] = useState<Load<CityScore[]> & { asked: string[] }>({ data: null, loading: false, error: null, asked: [] });
+  const [swapping, setSwapping] = useState<string | null>(null);
+  const excludeRef = useRef<string[]>([]);
+  const includeRef = useRef<string[]>([]);
+  excludeRef.current = exclude;
+  includeRef.current = include;
   const stateRef = useRef(state);
   stateRef.current = state;
+  /** the city the shown field and ranking belong to; another city's results are never shown as this one's */
+  const dataCity = useRef<string | null>(null);
+  /** bumps on every plan request and city change, so a late answer for an old request is dropped */
+  const planSeq = useRef(0);
+  /** bumps when the second person is removed, so their in-flight searches don't bring them back */
+  const companionEpoch = useRef(0);
 
   // hydrate from URL once
   useEffect(() => {
@@ -70,11 +90,27 @@ function useStore() {
   }, []);
 
   // keep URL in sync, remember recent explorations
+  // opening a neighborhood is a step the browser's Back button undoes; everything else edits the current entry
+  const lastHood = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const onPop = () => {
+      const s = decodeState(new URLSearchParams(window.location.search).get("s"));
+      if (!s) return;
+      lastHood.current = s.neighborhood ?? null;
+      setStateRaw(s);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
   useEffect(() => {
     if (!hydrated) return;
     const enc = encodeState(state);
     const url = `${window.location.pathname}?s=${enc}`;
-    window.history.replaceState(null, "", url);
+    const hood = state.neighborhood ?? null;
+    const deeper = lastHood.current !== undefined && hood !== null && hood !== lastHood.current;
+    lastHood.current = hood;
+    if (deeper) window.history.pushState(null, "", url);
+    else window.history.replaceState(null, "", url);
     if (activeLoves(state.loves).length) {
       try {
         const list = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]") as { s: string; city: string; loves: string[]; at: number }[];
@@ -87,7 +123,10 @@ function useStore() {
     }
   }, [state, hydrated]);
 
-  const patch = useCallback((ops: StatePatch[]) => setStateRaw((s) => applyPatches(s, ops)), []);
+  const patch = useCallback((ops: StatePatch[]) => {
+    if (ops.some((op) => op.op === "set_companion" && op.loves === null)) companionEpoch.current++;
+    setStateRaw((s) => applyPatches(s, ops));
+  }, []);
   const setState = useCallback((fn: (s: ExploreState) => ExploreState) => setStateRaw(fn), []);
 
   // --- field + neighborhoods + fingerprint, debounced on signal changes
@@ -104,8 +143,12 @@ function useStore() {
     const ac = new AbortController();
     const t = setTimeout(async () => {
       const s = stateRef.current;
-      setField((f) => ({ ...f, loading: true, error: null }));
-      setHoods((h) => ({ ...h, loading: true, error: null }));
+      const city = s.city.trim().toLowerCase();
+      // keep the old terrain on screen while the same city recomputes; a new city starts empty
+      const fresh = dataCity.current !== city;
+      if (fresh) dataCity.current = null;
+      setField((f) => ({ data: fresh ? null : f.data, loading: true, error: null }));
+      setHoods((h) => ({ data: fresh ? null : h.data, loading: true, error: null }));
       setPrint((p) => ({ ...p, loading: true, error: null }));
       api.fingerprint(s, ac.signal).then(
         (data) => setPrint({ data, loading: false, error: null }),
@@ -113,11 +156,15 @@ function useStore() {
       );
       try {
         const f = await api.field(s, ac.signal);
+        dataCity.current = city;
         setField({ data: f, loading: false, error: null });
       } catch (e) {
         const err = e as HomingError;
         if (err.code === "aborted") return;
         setField((f) => ({ ...f, loading: false, error: err }));
+        // without a field there is no ranking for this city either
+        setHoods({ data: null, loading: false, error: err });
+        return;
       }
       try {
         const n = await api.neighborhoods(s, ac.signal);
@@ -154,37 +201,137 @@ function useStore() {
     );
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, fk, nonce]);
+  }, [selected?.id, fk, nonce, state.budget]);
 
-  const makePlan = useCallback(async () => {
+  const makePlan = useCallback(async (opts: { exclude?: string[]; include?: string[] } = {}) => {
     const s = stateRef.current;
+    const ex = opts.exclude ?? excludeRef.current;
+    const inc = opts.include ?? includeRef.current;
     const ranked = hoods.data ?? [];
     if (!s.neighborhood && !ranked.length) return;
     const first = s.neighborhood ?? ranked[0].id;
     const rest = ranked.filter((n) => n.id !== first).map((n) => n.id);
     const ids = [first, ...rest].slice(0, s.days);
+    const seq = ++planSeq.current;
     setPlan({ data: null, loading: true, error: null });
     try {
-      setPlan({ data: await api.plan(s, ids), loading: false, error: null });
+      const data = await api.plan(s, ids, { exclude: ex, include: inc });
+      if (seq === planSeq.current) setPlan({ data, loading: false, error: null });
     } catch (e) {
-      setPlan({ data: null, loading: false, error: e as HomingError });
+      if (seq === planSeq.current) setPlan({ data: null, loading: false, error: e as HomingError });
     }
   }, [hoods.data]);
 
-  // re-plan when days change and a plan exists
-  const days = state.days;
+  // re-plan when trip settings change and a plan exists
   const hadPlan = !!plan.data;
   useEffect(() => {
     if (hadPlan) void makePlan();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days]);
+  }, [state.days, state.pace, state.startHour, state.budget]);
+
+  // a new city starts with a clean slate of plan edits
+  useEffect(() => {
+    planSeq.current++;
+    setPlan(idle());
+    setExclude([]);
+    setInclude([]);
+    setOpenPlace(null);
+    setCompare([]);
+  }, [state.city]);
+
+  const notify = useCallback((text: string, undo?: () => void) => {
+    setToast({ id: Date.now(), text, undo });
+  }, []);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast((cur) => (cur?.id === toast.id ? null : cur)), 5000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // shortlist lives per city in this browser
+  const savedKey = `homing.saved.${state.city.toLowerCase()}`;
+  useEffect(() => {
+    try {
+      setSaved(JSON.parse(localStorage.getItem(savedKey) ?? "[]") as Place[]);
+    } catch {
+      setSaved([]);
+    }
+  }, [savedKey]);
+  const persistSaved = useCallback(
+    (list: Place[]) => {
+      setSaved(list);
+      try {
+        localStorage.setItem(savedKey, JSON.stringify(list));
+      } catch {
+        /* storage unavailable */
+      }
+    },
+    [savedKey],
+  );
+  const isSaved = useCallback((id: string) => saved.some((p) => p.id === id), [saved]);
+  const toggleSave = useCallback(
+    (p: Place) => {
+      if (saved.some((x) => x.id === p.id)) {
+        const before = saved;
+        persistSaved(saved.filter((x) => x.id !== p.id));
+        notify(`Removed ${p.name} from your shortlist`, () => persistSaved(before));
+      } else {
+        persistSaved([p, ...saved].slice(0, 24));
+        notify(`Saved ${p.name} to your shortlist`);
+      }
+    },
+    [saved, persistSaved, notify],
+  );
+
+  /** Replace one stop: plan again without it; the solver keeps the other stops where it can. */
+  const swapStop = useCallback(
+    async (placeId: string) => {
+      const next = [...new Set([...excludeRef.current, placeId])];
+      const inc = includeRef.current.filter((id) => id !== placeId);
+      setExclude(next);
+      setInclude(inc);
+      setSwapping(placeId);
+      await makePlan({ exclude: next, include: inc });
+      setSwapping(null);
+    },
+    [makePlan],
+  );
+  const addToPlan = useCallback(
+    async (p: Place) => {
+      const inc = [...new Set([...includeRef.current, p.id])];
+      const ex = excludeRef.current.filter((id) => id !== p.id);
+      setInclude(inc);
+      setExclude(ex);
+      await makePlan({ include: inc, exclude: ex });
+      notify(`${p.name} is in your plan`);
+    },
+    [makePlan, notify],
+  );
+  const planWithSaved = useCallback(async () => {
+    const inc = [...new Set([...includeRef.current, ...saved.map((p) => p.id)])].slice(0, 12);
+    setInclude(inc);
+    await makePlan({ include: inc });
+  }, [makePlan, saved]);
+
+  // --- compare cities with the same taste
+  const compareCities = useCallback(async (list: string[]) => {
+    const asked = [...new Set(list.map((c) => c.trim()).filter(Boolean))].slice(0, 5);
+    if (asked.length < 2) return;
+    setCities({ data: null, loading: true, error: null, asked });
+    try {
+      setCities({ data: await api.cities(stateRef.current, asked), loading: false, error: null, asked });
+    } catch (e) {
+      setCities({ data: null, loading: false, error: e as HomingError, asked });
+    }
+  }, []);
 
   // --- loves
   const addLove = useCallback(
     async (query: string, target: "you" | "them" = "you") => {
-      const q = query.trim();
+      const q = query.trim().slice(0, 120);
       if (!q) return;
       const key = `${target}:${q.toLowerCase()}`;
+      const epoch = companionEpoch.current;
       setPending((p) => ({ ...p, [key]: true }));
       let love: ResolvedLove = { query: q, chosen: null, candidates: [], weight: 1 };
       try {
@@ -199,7 +346,7 @@ function useStore() {
         return n;
       });
       if (target === "you") patch([{ op: "add_love", love }]);
-      else
+      else if (epoch === companionEpoch.current)
         setStateRaw((s) => {
           const cur = s.companion?.loves ?? [];
           if (cur.some((l) => l.query.toLowerCase() === q.toLowerCase())) return s;
@@ -218,12 +365,30 @@ function useStore() {
   );
 
   const updateLove = useCallback((target: "you" | "them", query: string, fn: (l: ResolvedLove) => ResolvedLove | null) => {
+    const s0 = stateRef.current;
+    const removed = (target === "you" ? s0.loves : s0.companion?.loves ?? []).find((l) => l.query === query && fn(l) === null);
+    if (removed) notify(`Removed ${removed.chosen?.name ?? removed.query}`, () => setStateRaw(s0));
     setStateRaw((s) => {
       const list = target === "you" ? s.loves : s.companion?.loves ?? [];
       const next = list.map((l) => (l.query === query ? fn(l) : l)).filter(Boolean) as ResolvedLove[];
       if (target === "you") return { ...s, loves: next };
       return { ...s, companion: next.length || s.companion ? { loves: next } : null };
     });
+  }, [notify]);
+
+  /** Restore the "did you mean" list for a love that arrived through a shared link. */
+  const loadCandidates = useCallback(async (target: "you" | "them", query: string) => {
+    try {
+      const results = await api.search(query);
+      if (results.length < 2) return;
+      setStateRaw((s) => {
+        const fill = (list: ResolvedLove[]) => list.map((l) => (l.query === query && l.candidates.length <= 1 ? { ...l, candidates: results } : l));
+        if (target === "you") return { ...s, loves: fill(s.loves) };
+        return s.companion ? { ...s, companion: { loves: fill(s.companion.loves) } } : s;
+      });
+    } catch {
+      /* the menu still works without alternatives */
+    }
   }, []);
 
   // --- agent
@@ -266,6 +431,24 @@ function useStore() {
   );
 
   return {
+    exclude,
+    include,
+    saved,
+    isSaved,
+    toggleSave,
+    planWithSaved,
+    openPlace,
+    setOpenPlace,
+    toast,
+    setToast,
+    notify,
+    swapStop,
+    swapping,
+    addToPlan,
+    compare,
+    setCompare,
+    cities,
+    compareCities,
     state,
     hydrated,
     patch,
@@ -282,6 +465,7 @@ function useStore() {
     addLove,
     addResolved,
     updateLove,
+    loadCandidates,
     chat,
     agentBusy,
     askAgent,

@@ -7,13 +7,14 @@ import { cityCenter } from "@/server/engine/city";
 import { percentileRanks } from "@/server/engine/geo";
 import { neighborhoodDrivers, rankNeighborhoods } from "@/server/engine/neighborhoods";
 import { specificPlaceGenre } from "@/server/engine/taste-tags";
+import { clearEvidenceCache } from "@/server/engine/evidence";
 import { findPlaces, matchesCategory, openingHours, placeFromRow } from "@/server/engine/places";
 import { activeLoves, TasteField } from "@/shared/contracts";
 import { heat, love, state, venue } from "./helpers";
 
 vi.mock("@/server/qloo/client", async (original) => ({ ...await original<typeof import("@/server/qloo/client")>(), qlooGet: vi.fn() }));
 const get = vi.mocked(qlooGet);
-beforeEach(() => { get.mockReset(); });
+beforeEach(() => { get.mockReset(); clearEvidenceCache(); });
 
 export function rawCell(h: string, affinity: number, popularity = 0, lon = 0): Record<string, unknown> {
   return { location: { geohash: h, latitude: 0, longitude: lon }, query: { affinity, popularity } };
@@ -215,8 +216,8 @@ describe("neighborhoods and places", () => {
     const result = await findPlaces(state(), ranked[0].id, ["coffee"]);
     expect(result).toHaveLength(6);
     expect(result[0]).toMatchObject({ category: "coffee", why: ["Cozy", "quiet"] });
-    const query = get.mock.calls.find(([, params]) => params["filter.location"]);
-    expect(query?.[1]).toMatchObject({ "filter.location": "POINT(0.001 0)", "filter.location.radius": 900, take: 8 });
+    const query = get.mock.calls.find(([, params]) => params["filter.location.radius"] === 900);
+    expect(query?.[1]).toMatchObject({ "filter.location": "POINT(0.001 0)", "filter.location.radius": 900, take: 10 });
     await expect(findPlaces(state(), "stale")).rejects.toMatchObject({ error: { code: "not_found" } });
   });
 
@@ -225,6 +226,7 @@ describe("neighborhoods and places", () => {
       if (params["filter.type"] === "urn:tag") return { results: { tags: [] } };
       if (params["filter.type"] === "urn:heatmap") return { results: { heatmap: params["signal.interests.entities"] === "first"
         ? [rawCell("aaaaaa", 1), rawCell("bbbbbb", 0.1, 0, 0.05)] : [rawCell("aaaaaa", 0.1), rawCell("bbbbbb", 1, 0, 0.05)] } };
+      if (params["filter.location.query"]) return centerResponse;
       return { results: { entities: params.page === 1 ? [venue("a1", "A", 0, 0.5), venue("a2", "A", 0.002, 0.5), venue("a3", "A", 0.001, 0.5), venue("b1", "B", 0.05, 0.5), venue("b2", "B", 0.052, 0.5), venue("b3", "B", 0.051, 0.5)] : [] } };
     });
     const field: TasteField = { city: "Test City", center: [0, 0], bbox: [0, 0, 0.05, 0], sparse: true, signalsWithoutGeo: [], cells: [

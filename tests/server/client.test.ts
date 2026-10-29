@@ -79,17 +79,19 @@ describe("Qloo client", () => {
   });
 
   it("reuses each city/entity heatmap when adding a fifth love", async () => {
-    const fetcher = vi.fn().mockImplementation(async () => Response.json({ results: { heatmap: [] } }));
+    // the city centre is one cached request per city; heatmaps then ask around that point
+    const fetcher = vi.fn().mockImplementation(async (url: URL) => Response.json({ results: url.searchParams.get("filter.type") === "urn:heatmap"
+      ? { heatmap: [] } : { entities: [{ entity_id: "p", name: "p", location: { lon: url.searchParams.get("filter.location.query") === "Other City" ? 2 : 1, lat: 1 } }] } }));
     vi.stubGlobal("fetch", fetcher);
     const four = ["a", "b", "c", "d"].map((id) => love(id));
     await loadPersonMaps("Test City", four);
-    expect(fetcher).toHaveBeenCalledTimes(5);
+    expect(fetcher).toHaveBeenCalledTimes(6);
     await loadPersonMaps("Test City", [...four, love("e")]);
-    expect(fetcher).toHaveBeenCalledTimes(7);
+    expect(fetcher).toHaveBeenCalledTimes(8);
     const ids = fetcher.mock.calls.map(([url]) => (url as URL).searchParams.get("signal.interests.entities"));
     for (const id of ["a", "b", "c", "d"]) expect(ids.filter((value) => value === id)).toHaveLength(1);
     await loadPersonMaps("Other City", [four[0]]);
-    expect(fetcher).toHaveBeenCalledTimes(8);
+    expect(fetcher).toHaveBeenCalledTimes(10);
   });
 
   it("maps network failures and invalid JSON without exposing upstream detail", async () => {

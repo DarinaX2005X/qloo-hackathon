@@ -11,6 +11,7 @@ const { chromium } = require(playwrightPath);
 const playwrightVersion = require(`${playwrightPath}/package.json`).version;
 const BASE_URL = process.env.BASE_URL || 'https://homing-taste.vercel.app';
 const TIMEOUT = 20_000;
+const LOAD_TIMEOUT = 45_000;
 const reportDir = resolve(dirname(fileURLToPath(import.meta.url)), 'report');
 await mkdir(reportDir, { recursive: true });
 const started = new Date();
@@ -72,13 +73,13 @@ async function poll(fn, description, timeout = TIMEOUT) {
   } while (performance.now() - begin < timeout);
   throw new Error(`${description}: not satisfied within ${timeout} ms${last ? `; last observation: ${last}` : ''}`);
 }
-async function countAtLeast(p, id, min) {
+async function countAtLeast(p, id, min, timeout = LOAD_TIMEOUT) {
   const loc = p.getByTestId(id);
   await poll(async () => {
     const count = await loc.count();
     assert.ok(count >= min, `${id}: expected >= ${min}, observed ${count}`);
     return true;
-  }, `${id}: expected >= ${min}`);
+  }, `${id}: expected >= ${min}`, timeout);
   await loc.first().waitFor({ state: 'visible' });
   return loc.count();
 }
@@ -121,7 +122,7 @@ async function scenario(id, name, fn) {
   console.log(`${active.status} ${id} (${(active.durationMs / 1000).toFixed(2)}s)`);
   await saveReport();
 }
-async function mapReady(p, timeout = TIMEOUT) {
+async function mapReady(p, timeout = LOAD_TIMEOUT) {
   // The production build does not expose a MapLibre instance. Check real rendered
   // WebGL pixels, not mere canvas existence, without patching/instrumenting the app.
   await p.waitForFunction(() => {
@@ -145,12 +146,12 @@ async function openTaste(p) {
   await countAtLeast(p, 'neighborhood-row', 3);
 }
 function expected4xx(e) {
-  if (e.kind !== 'console.error' || e.scenario !== '9' || !/Failed to load resource:.*\b4\d\d\b/i.test(e.text)) return false;
+  if (e.kind !== 'console.error' || !['9', '11'].includes(e.scenario) || !/Failed to load resource:.*\b4\d\d\b/i.test(e.text)) return false;
   // Only exact resource URLs with an observed intentional edge-case 4xx qualify.
-  return httpErrors.some(r => r.scenario === '9' && r.status >= 400 && r.status < 500 && r.url === e.location.url && (
-    new URL(r.url).pathname === '/nope' ||
-    (new URL(r.url).pathname === '/api/search' && new URL(r.url).searchParams.get('q') === 'qwzxv') ||
-    (['/api/field', '/api/neighborhoods', '/api/fingerprint'].includes(new URL(r.url).pathname) && (() => { try { return JSON.parse(r.requestBody).city === 'Lisbonn'; } catch { return false; } })())
+  return httpErrors.some(r => r.scenario === e.scenario && r.status >= 400 && r.status < 500 && r.url === e.location.url && (
+    (r.scenario === '9' && new URL(r.url).pathname === '/nope') ||
+    (r.scenario === '9' && new URL(r.url).pathname === '/api/search' && new URL(r.url).searchParams.get('q') === 'qwzxv') ||
+    (['/api/field', '/api/neighborhoods', '/api/fingerprint'].includes(new URL(r.url).pathname) && (() => { try { return JSON.parse(r.requestBody).city === (r.scenario === '11' ? 'Qwzxplorvillle' : 'Lisbonn'); } catch { return false; } })())
   ));
 }
 const md = value => String(value ?? '').replaceAll('|', '\\|').replace(/\r?\n/g, '<br>');
@@ -277,6 +278,18 @@ try {
       await shot(page, 'agent');
       return { responseMs, before, after, reply: await replies.last().innerText() };
     });
+    await step('Quiet cafes near the water adds visible Quiet and Waterfront refinements', page, async () => {
+      const input = page.getByTestId('agent-input');
+      await input.fill('Find quiet cafes near the water');
+      await input.press('Enter');
+      await poll(async () => {
+        const tags = stateOf(page).r || [];
+        return ['Quiet', 'Waterfront'].every(name => tags.some(t => t[1].toLowerCase() === name.toLowerCase()));
+      }, 'Quiet and Waterfront resolved in URL', LOAD_TIMEOUT);
+      for (const name of ['Quiet', 'Waterfront']) await page.getByRole('button', { name: `Remove ${name}`, exact: true }).waitFor({ state: 'visible' });
+      await shot(page, 'agent-refinements');
+      return { refinements: stateOf(page).r };
+    });
   });
   await scenario('6', 'Pair URL with Succession renders You / Them ranking bars', async () => {
     await step('Resolve companion via UI, reopen ?s= with p=[Succession], inspect bars', page, async () => {
@@ -376,13 +389,16 @@ try {
     });
     await step('Lisbonn resolves or shows a useful visible error without blank screen', page, async () => {
       await openTaste(page);
-      const responsePromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/neighborhoods' && r.request().postDataJSON()?.city === 'Lisbonn', { timeout: TIMEOUT });
+      const fieldPromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/field' && r.request().postDataJSON()?.city === 'Lisbonn', { timeout: LOAD_TIMEOUT });
+      void fieldPromise.catch(() => {});
+      const responsePromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/neighborhoods' && r.request().postDataJSON()?.city === 'Lisbonn', { timeout: LOAD_TIMEOUT });
       void responsePromise.catch(() => {});
       await page.getByTestId('city-combobox').fill('Lisbonn');
       await page.getByTestId('city-combobox').press('Enter');
       await poll(() => stateOf(page).c === 'Lisbonn', 'URL city committed to Lisbonn');
       // Wait for a response for the misspelled city so old Lisbon rows cannot pass.
-      const response = await responsePromise;
+      const fieldResponse = await fieldPromise;
+      const response = fieldResponse.ok() ? await responsePromise : fieldResponse;
       await response.finished();
       const body = await response.json();
       let outcome;
@@ -392,7 +408,7 @@ try {
         const note = page.locator('p').filter({ hasText: /couldn.t|could not|not find|not found|try|unavailable|offline|slow|no named neighborhoods|no .*data|city.*(recogn|locat|support)|larger city/i });
         for (const item of await note.all()) if (await item.isVisible()) { outcome = { type: 'visible-feedback', text: await item.innerText() }; return true; }
         return false;
-      }, 'Results or understandable error for Lisbonn');
+      }, 'Results or understandable error for Lisbonn', LOAD_TIMEOUT);
       assert.equal(await page.getByTestId('city-combobox').isVisible(), true);
       assert.equal(await page.getByTestId('love-input').isEnabled(), true);
       assert.ok((await page.locator('main').boundingBox())?.height > 100, 'Main application is blank/collapsed');
@@ -407,6 +423,211 @@ try {
       await page.getByRole('link', { name: 'Map my taste', exact: true }).waitFor();
       await shot(page, '404');
       return { status: response.status(), heading: await heading.innerText() };
+    });
+  });
+  await scenario('11', 'World city Tokyo, unknown-city clearing and Lisbon recovery', async () => {
+    const ready = await step('Tokyo compact state renders >= 3 neighborhoods and real WebGL pixels', page, async () => {
+      assert.ok(chipState?.l?.length >= 2, 'Resolved taste state unavailable');
+      const state = { c: 'Tokyo, Japan', l: chipState.l };
+      await page.goto(urlFor(state), { waitUntil: 'domcontentloaded' });
+      const count = await countAtLeast(page, 'neighborhood-row', 3);
+      assert.equal(stateOf(page).c, state.c);
+      assert.deepEqual(stateOf(page).l, state.l);
+      await mapReady(page);
+      await shot(page, 'tokyo');
+      return { city: stateOf(page).c, neighborhoods: count, names: await page.getByTestId('neighborhood-row').locator('span.truncate').allInnerTexts(), renderedMapPixels: true };
+    });
+    await step('Unknown city shows could not find feedback and removes Tokyo ranking', page, async () => {
+      assert.ok(ready, 'Dependency failed: Tokyo did not load');
+      const city = page.getByTestId('city-combobox');
+      await city.fill('Qwzxplorvillle');
+      // Clicking away commits the typed value without racing asynchronous options.
+      await page.getByRole('heading', { name: 'Your neighborhoods', exact: true }).click();
+      await poll(() => stateOf(page).c === 'Qwzxplorvillle', 'Unknown city committed');
+      const error = page.getByText(/We couldn.t find.*Qwzxplorvillle/i);
+      await error.waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+      await poll(async () => await page.getByTestId('neighborhood-row').count() === 0 && await page.locator('.maplibregl-marker').count() === 0, 'Previous city rows and map markers cleared');
+      await shot(page, 'unknown-city-cleared');
+      return { city: stateOf(page).c, error: await error.innerText(), neighborhoods: 0, mapMarkers: 0, terrainEvidence: 'Review unknown-city-cleared screenshot for absent Tokyo terrain; basemap may remain.' };
+    });
+    await step('Switching back to Lisbon restores neighborhoods and map', page, async () => {
+      const city = page.getByTestId('city-combobox');
+      await city.fill('Lisbon');
+      await city.press('Enter');
+      await poll(() => /^Lisbon(?:,|$)/.test(stateOf(page).c), 'Lisbon committed');
+      const count = await countAtLeast(page, 'neighborhood-row', 3);
+      await mapReady(page);
+      await shot(page, 'lisbon-recovered');
+      return { city: stateOf(page).c, neighborhoods: count };
+    });
+  });
+  await scenario('12', 'Landing typed city commits its best match on Map my taste', async () => {
+    await step('Reykjav without Enter opens explore with Reykjavik URL city', page, async () => {
+      await page.goto(urlFor(null, '/'), { waitUntil: 'domcontentloaded' });
+      const hero = page.locator('section').filter({ has: page.getByTestId('hero-love-input') });
+      const cta = hero.getByRole('button', { name: 'Map my taste', exact: true });
+      await poll(() => cta.isEnabled(), 'Resolved hero tastes enable CTA', LOAD_TIMEOUT);
+      const lookupPromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/localities' && new URL(r.url()).searchParams.get('q') === 'Reykjav', { timeout: LOAD_TIMEOUT });
+      void lookupPromise.catch(() => {});
+      await hero.getByTestId('city-combobox').fill('Reykjav');
+      // Observe the real lookup, including failures, then exercise the CTA anyway.
+      // Never select an option or press Enter to make the city commit succeed.
+      const response = await lookupPromise;
+      const lookup = { status: response.status(), body: await response.json() };
+      if (lookup.body.results?.length) await page.getByRole('option').filter({ hasText: /^Reykjav[ií]k(?![a-z])/ }).first().waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+      await shot(page, 'typed-reykjav');
+      await cta.click();
+      await page.waitForURL(u => u.pathname === '/explore');
+      const state = stateOf(page);
+      await page.getByTestId('city-combobox').waitFor();
+      await shot(page, 'reykjavik-explore');
+      assert.match(state.c, /^Reykjavik/i, `CTA must retain the typed city best match; observed city=${state.c}; locality lookup=${JSON.stringify(lookup)}`);
+      assert.ok(state.l.filter(l => l.id).length >= 2, 'CTA lost resolved tastes');
+      return { typed: 'Reykjav', city: state.c, tastes: state.l.map(l => l.q), lookup };
+    });
+  });
+  await scenario('13', 'Genre love resolves to an artist with for jazz subtitle', async () => {
+    await step('Adding jazz creates a resolved Music, for jazz chip', page, async () => {
+      await openTaste(page);
+      await page.getByTestId('love-input').fill('jazz');
+      await page.getByTestId('love-input').press('Enter');
+      const chip = page.getByRole('button', { name: /Music, for jazz/i });
+      const love = await poll(async () => {
+        const resolved = stateOf(page).l.find(l => l.q === 'jazz' && l.id);
+        assert.equal(resolved?.d, 'artist', `Expected jazz artist stand-in; observed ${JSON.stringify(resolved || null)}`);
+        return await chip.isVisible() && resolved;
+      }, 'Resolved jazz artist in URL and visible Music, for jazz chip', LOAD_TIMEOUT);
+      await shot(page, 'genre-love');
+      return { chip: await chip.innerText(), love };
+    });
+  });
+  await scenario('14', 'Must-haves, budget, packed plan, swap and Saved drawer flow', async () => {
+    let beforeCount;
+    let firstStop;
+    await step('Cozy resolves as a refinement and Budget $$ persists', page, async () => {
+      await openTaste(page);
+      const refinedResponse = page.waitForResponse(r => new URL(r.url()).pathname === '/api/neighborhoods' && r.request().postDataJSON()?.refinements?.some(t => /^cozy$/i.test(t.name)), { timeout: LOAD_TIMEOUT });
+      void refinedResponse.catch(() => {});
+      await page.getByRole('button', { name: 'Cozy', exact: true }).click();
+      await page.getByRole('button', { name: 'Remove Cozy', exact: true }).waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+      await poll(() => stateOf(page).r?.some(t => t[0] && /^cozy$/i.test(t[1])), 'Resolved Cozy tag in URL');
+      const budget = page.getByRole('radio', { name: '$$', exact: true });
+      await budget.click();
+      await poll(async () => stateOf(page).b === 2 && await budget.getAttribute('aria-checked') === 'true', 'Budget $$ selected and in URL');
+      const response = await refinedResponse;
+      assert.ok(response.ok(), `Cozy ranking HTTP ${response.status()}`);
+      const names = (await response.json()).neighborhoods.map(n => n.name);
+      await poll(async () => (await page.getByTestId('neighborhood-row').locator('span.truncate').allInnerTexts()).join('|') === names.join('|'), 'Rendered ranking matches Cozy response', LOAD_TIMEOUT);
+      await shot(page, 'trip-controls');
+      return { refinements: stateOf(page).r, budget: stateOf(page).b };
+    });
+    const planned = await step('First neighborhood produces a plan; Packed stop count does not decrease', page, async () => {
+      await countAtLeast(page, 'neighborhood-row', 3);
+      await page.getByTestId('neighborhood-row').first().click();
+      await countAtLeast(page, 'place-card', 1);
+      await page.getByRole('button', { name: 'Plan my first days', exact: true }).click();
+      beforeCount = await countAtLeast(page, 'plan-stop', 1);
+      const packedResponse = page.waitForResponse(r => new URL(r.url()).pathname === '/api/plan' && r.request().postDataJSON()?.pace === 'packed', { timeout: LOAD_TIMEOUT });
+      void packedResponse.catch(() => {});
+      await page.getByRole('radio', { name: 'Packed', exact: true }).click();
+      const response = await packedResponse;
+      assert.ok(response.ok(), `Packed plan HTTP ${response.status()}`);
+      await response.finished();
+      await poll(() => stateOf(page).pc === 'packed', 'Packed pace in URL');
+      const afterCount = await countAtLeast(page, 'plan-stop', beforeCount);
+      firstStop = await page.getByTestId('plan-stop').first().locator('p').first().innerText();
+      await page.getByTestId('plan-stop').first().scrollIntoViewIfNeeded();
+      await shot(page, 'packed-plan');
+      return { beforeCount, afterCount, firstStop };
+    });
+    await step('Swap first stop changes its name and excludes the original', page, async () => {
+      assert.ok(planned, 'Dependency failed: Packed plan unavailable');
+      const stop = page.getByTestId('plan-stop').first();
+      await stop.hover();
+      await stop.getByRole('button', { name: /^Swap / }).click();
+      const changed = await poll(async () => {
+        const names = await page.getByTestId('plan-stop').locator('p.truncate').allInnerTexts();
+        return names.length && names[0] !== firstStop && !names.includes(firstStop) && names;
+      }, `Swapped plan no longer contains ${firstStop}`, LOAD_TIMEOUT);
+      await page.getByTestId('plan-stop').first().scrollIntoViewIfNeeded();
+      await shot(page, 'swapped-stop');
+      return { before: firstStop, after: changed[0], stops: changed.length };
+    });
+    await step('Place drawer Save is reflected in ranking Saved tab', page, async () => {
+      const card = page.getByTestId('place-card').first();
+      await card.waitFor();
+      const name = await card.getByRole('heading').innerText();
+      await card.getByRole('button', { name: `Open ${name}`, exact: true }).click();
+      await page.getByRole('heading', { name, exact: true }).waitFor();
+      await page.getByRole('button', { name: /^(Add to plan|In your plan)$/, exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await poll(async () => await page.getByRole('button', { name: 'Saved', exact: true }).getAttribute('aria-pressed') === 'true', 'Drawer Save becomes Saved');
+      await shot(page, 'saved-drawer');
+      await page.getByRole('button', { name: 'Back', exact: true }).click();
+      await page.getByRole('button', { name: 'All neighborhoods', exact: true }).click();
+      await page.getByRole('heading', { name: 'Your neighborhoods', exact: true }).waitFor();
+      await page.getByRole('radio', { name: /^Saved\b/ }).click();
+      await page.getByTestId('place-card').getByRole('heading', { name, exact: true }).waitFor();
+      const planSaved = page.getByRole('button', { name: /^Plan around these \d+$/ });
+      await planSaved.waitFor();
+      await shot(page, 'saved-tab');
+      return { savedPlace: name, action: await planSaved.innerText() };
+    });
+  });
+  await scenario('15', 'Compare cities relative index and open another city map', async () => {
+    await step('Lisbon + Berlin + a third city compare; first result is 100 and map action switches city', page, async () => {
+      await openTaste(page);
+      const originalCity = stateOf(page).c;
+      await page.getByRole('button', { name: 'Compare cities', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Compare cities', exact: true });
+      await dialog.waitFor();
+      for (const name of ['Lisbon', 'Berlin']) await dialog.getByRole('button', { name: `Remove ${name}`, exact: true }).waitFor();
+      // Exercise adding a city even though a third default is provided.
+      const extra = dialog.getByRole('button', { name: 'Remove Mexico City', exact: true });
+      if (await extra.count()) await extra.click();
+      await dialog.getByTestId('city-combobox').fill('Tokyo');
+      await dialog.getByTestId('city-combobox').press('Enter');
+      await dialog.getByRole('button', { name: /^Remove Tokyo(?:,|$)/ }).waitFor();
+      const listed = await dialog.getByRole('button', { name: /^Remove / }).allTextContents();
+      assert.ok(listed.length >= 3, 'Expected at least three listed cities');
+      await dialog.getByRole('button', { name: 'Compare', exact: true }).click();
+      const cards = dialog.locator('ol > li');
+      await poll(async () => await cards.count() >= 2 && await dialog.getByRole('button', { name: /^Open the map of / }).count() >= 2, 'At least two successful city result cards', LOAD_TIMEOUT);
+      await cards.first().getByText('100', { exact: true }).waitFor();
+      const names = await cards.allInnerTexts();
+      await shot(page, 'city-comparison');
+      const actions = dialog.getByRole('button', { name: /^Open the map of / });
+      let target;
+      for (const action of await actions.all()) {
+        const name = (await action.innerText()).replace(/^Open the map of /, '').trim();
+        if (name !== originalCity.split(',')[0]) { target = name; await action.click(); break; }
+      }
+      assert.ok(target, 'No successful result for a different city');
+      await dialog.waitFor({ state: 'hidden' });
+      await poll(() => stateOf(page).c.split(',')[0] === target, `City URL switches to ${target}`);
+      await countAtLeast(page, 'neighborhood-row', 3);
+      await mapReady(page);
+      await shot(page, 'compared-city-map');
+      return { results: names, originalCity, city: stateOf(page).c, topIndex: 100 };
+    });
+  });
+  await scenario('16', 'Browser Back restores explore ranking after opening a neighborhood', async () => {
+    await step('Neighborhood navigation adds history; goBack returns ranking at /explore', page, async () => {
+      await openTaste(page);
+      const beforeNames = await page.getByTestId('neighborhood-row').locator('span.truncate').allInnerTexts();
+      await page.getByTestId('neighborhood-row').first().click();
+      await page.getByRole('button', { name: 'All neighborhoods', exact: true }).waitFor();
+      await poll(() => stateOf(page).nb, 'Selected neighborhood in URL');
+      await countAtLeast(page, 'place-card', 1);
+      await shot(page, 'before-browser-back');
+      await page.goBack();
+      await page.getByRole('heading', { name: 'Your neighborhoods', exact: true }).waitFor();
+      const count = await countAtLeast(page, 'neighborhood-row', 3);
+      assert.equal(new URL(page.url()).pathname, '/explore');
+      assert.ok(!stateOf(page).nb, 'Back retained selected neighborhood');
+      assert.deepEqual(await page.getByTestId('neighborhood-row').locator('span.truncate').allInnerTexts(), beforeNames);
+      await shot(page, 'back-to-ranking');
+      return { path: new URL(page.url()).pathname, neighborhoods: count, sameRanking: true };
     });
   });
   await scenario('10', 'No unexpected console.error or uncaught page errors across all pages', async () => {
@@ -432,4 +653,4 @@ try {
 await saveReport();
 const failures = results.filter(r => r.status === 'FAIL').length;
 console.log(`\n${results.length - failures} PASS / ${failures} FAIL — ${resolve(reportDir, 'report.md')}`);
-if (failures || results.length !== 10) process.exitCode = 1;
+if (failures || results.length !== 16) process.exitCode = 1;

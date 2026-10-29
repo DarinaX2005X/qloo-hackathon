@@ -1,11 +1,12 @@
-import { type ExploreState, type Neighborhood, type ResolvedLove, type TasteField } from "@/shared/contracts";
-import { qlooGet, record, resultRows, string, unit, type QlooRecord } from "@/server/qloo/client";
+import { type ExploreState, type Neighborhood, type TasteField } from "@/shared/contracts";
+import { record, string, unit, type QlooRecord } from "@/server/qloo/client";
 import { buildField, loadLoveMaps, loveSeries, type LoveSeries } from "./field";
-import { buildFingerprint, matchedPlaceTags } from "./fingerprint";
+import { matchedPlaceTags } from "./fingerprint";
 import { coordinates, focusRadius, haversine, mean, median, percentileRanks } from "./geo";
-import { signals } from "./signals";
+import { getCityEvidence } from "./evidence";
 
 export { coordinates } from "./geo";
+export { cityPlaces } from "./evidence";
 
 export function neighborhoodName(row: QlooRecord): string | undefined {
   const properties = record(row.properties);
@@ -34,23 +35,12 @@ export function neighborhoodDrivers(series: LoveSeries[], cityCells: string[], a
   })).sort((a, b) => b.share - a.share);
 }
 
-export async function cityPlaces(state: ExploreState, loves: ResolvedLove[] = state.loves): Promise<QlooRecord[]> {
-  const pages = await Promise.all([1, 2, 3].map(async (page) => resultRows(await qlooGet("/v2/insights", {
-    "filter.type": "urn:entity:place", "filter.location.query": state.city, ...signals(loves, state.refinements), take: 50, page,
-  }), "entities")));
-  const found = new Map<string, QlooRecord>();
-  for (const row of pages.flat()) {
-    const id = string(row.entity_id);
-    if (id && coordinates(row) && record(row.properties).is_closed !== true && !found.has(id)) found.set(id, row);
-  }
-  return [...found.values()].slice(0, 150);
-}
-
 export async function rankNeighborhoods(state: ExploreState, field?: TasteField): Promise<Neighborhood[]> {
-  const [taste, yours, theirs, fingerprint, individual] = await Promise.all([
-    field ?? buildField(state), cityPlaces(state), state.companion ? cityPlaces(state, state.companion.loves) : undefined, buildFingerprint(state),
+  const [taste, evidence, individual] = await Promise.all([
+    field ?? buildField(state), getCityEvidence(state),
     loadLoveMaps(state.city, state.loves),
   ]);
+  const { yours, theirs, fingerprint } = evidence;
   const series = loveSeries(individual, new Set(taste.cells.map((cell) => cell.h)));
   const radius = focusRadius(taste.center, taste.cells);
   const youById = new Map(yours.map((row) => [string(row.entity_id), unit(record(row.query).affinity)]));

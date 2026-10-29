@@ -47,6 +47,15 @@ export function applyPatches(state: ExploreState, ops: StatePatch[]): ExploreSta
       case "select_neighborhood":
         next.neighborhood = op.id;
         break;
+      case "set_budget":
+        next.budget = op.budget;
+        break;
+      case "set_pace":
+        next.pace = op.pace;
+        break;
+      case "set_start":
+        next.startHour = op.hour;
+        break;
     }
   }
   return next;

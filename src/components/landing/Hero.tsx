@@ -8,7 +8,7 @@ import { X } from "lucide-react";
 import type { ResolvedLove } from "@/shared/contracts";
 import { LIMITS } from "@/shared/contracts";
 import { TerrainMap } from "@/components/map/TerrainMap";
-import { CityPicker } from "@/components/ui/CityPicker";
+import { CityPicker, cityName } from "@/components/ui/CityPicker";
 import { Button, Spinner } from "@/components/ui/primitives";
 import { LogoMark } from "@/components/brand/Logo";
 import { DOMAIN_NAME } from "@/components/explore/LoveChips";
@@ -80,7 +80,7 @@ export function Hero() {
                 transition={{ type: "spring", stiffness: 300, damping: 26 }}
                 className="inline-block rounded-[14px] bg-you px-3 pb-1 text-white shadow-[var(--shadow-raised)]"
               >
-                {city}
+                {cityName(city)}
               </motion.span>
             </AnimatePresence>
           </h1>
@@ -168,7 +168,7 @@ export function Hero() {
               </p>
             ) : (
               <p className="flex items-center gap-2 text-ink-3">
-                <Spinner size={12} /> Reading the taste graph for {city}
+                <Spinner size={12} /> Reading the taste graph for {cityName(city)}
               </p>
             )}
           </div>

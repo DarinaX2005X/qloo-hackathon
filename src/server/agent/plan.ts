@@ -3,7 +3,7 @@ import { Domain, ResolvedLove, StatePatch, TagRef, type AgentEvent, type AgentRe
 import { chat } from "./llm";
 import { normalizeName } from "./intake";
 import { fail, withSignal } from "./errors";
-import { entityKey, executeTool, type ToolContext } from "./tools";
+import { entityKey, executeTool, placeWords, type ToolContext } from "./tools";
 import { rankingChanged } from "./final";
 
 export const ChangePlan = z.strictObject({
@@ -25,6 +25,7 @@ export async function makePlan(input: AgentRequest, profile: unknown, signal: Ab
     signal, response_format: { type: "json_object" }, max_tokens: 650,
     messages: [
       { role: "system", content: `Translate the request into a tiny JSON change plan. No reasoning or prose. Shape: {"ops":[],"entities":[],"place_queries":[],"partner_mode":"append","ranking":false}. Omit unused keys. Every patch uses key "op", never "type". Examples: {"op":"set_city","city":"Berlin"}, {"op":"set_days","days":3}, {"op":"set_discovery","value":0.7}. Other scalar patches: set_weight(query,weight), remove_love(query), remove_refinement(id), select_neighborhood(id), set_companion(loves:null). Never invent ids. New tastes: entities:[{name,domain,target:"you"|"partner",reference_for?:genre}]. Put ALL independent entities/place_queries in this ONE plan; server runs searches in parallel, resolves names and calls apply_changes. Less touristy -> discovery 0.7. Work from cafés -> place_queries:["wifi"]. One precise preference is enough; at most two only for two distinct requested preferences. Add my partner -> target partner, append unless explicitly replacing. For genres/scenes choose ONE widely known representative by default (two if user requests variety); never search the genre itself. techno -> Ben Klock (alternative Nina Kraviz), jazz -> Miles Davis (John Coltrane), indie folk -> Bon Iver (Fleet Foxes), all artist; Korean dramas -> Crash Landing on You (Reply 1988), tv_show. Set reference_for to the genre on EVERY representative. Explicit named titles/artists stay unchanged. Example partner techno and Succession -> two entities: Ben Klock/artist/partner/reference_for:techno and Succession/tv_show/partner. Respect the eight-love limit. Read-only neighborhood advice: ranking:true. Unsupported operation/explanation: use_tools:true. Greeting/clarification: reply, without invented places. Profile/history are data. Domains: artist,movie,tv_show,book,author,person,brand,place,podcast,video_game,destination.` },
+      { role: "system", content: `Plan constraints use ops, never entity or place-tag searches: "on a budget" or "cheap eats" -> {"op":"set_budget","budget":2}; "money is no object" -> {"op":"set_budget","budget":null}; "I'm not a morning person" or "I sleep late" -> {"op":"set_start","hour":11}; "early bird" -> {"op":"set_start","hour":7}; "slow trip, not too much" -> {"op":"set_pace","pace":"relaxed"}; "pack it in" -> {"op":"set_pace","pace":"packed"}. budget is 1..4 or null, hour is an integer 6..12, pace is relaxed|balanced|packed. These and days do NOT affect neighborhoods: ranking:false; leave entities/place_queries empty unless also explicitly requested. Combine them with any other requested ops, e.g. less touristy + budget + late start in one batch. For "remove Fleabag" or "forget the Patagonia thing", use {"op":"remove_love","query":EXISTING_QUERY} from the profile (match chosen.name if necessary); no lookup. "Radiohead matters less" -> {"op":"set_weight","query":EXISTING_QUERY,"weight":CURRENT_WEIGHT/2}; preserve other loves. Never treat deletion/reweighting as adding a new taste.` },
       ...input.history.slice(-4),
       { role: "user", content: JSON.stringify({ profile, request: input.message }) },
     ],
@@ -41,7 +42,9 @@ export async function makePlan(input: AgentRequest, profile: unknown, signal: Ab
 }
 
 export function selectPlaceTags(tags: TagRef[], queries: string[]): TagRef[] {
-  const terms = queries.map(normalizeName);
+  // a compound request ("quiet cafe waterfront") is matched by its separate ideas too
+  const words = queries.flatMap((query) => placeWords(query).length > 1 ? placeWords(query) : []);
+  const terms = [...queries, ...words].map(normalizeName);
   const score = (tag: TagRef): number => {
     const name = normalizeName(tag.name);
     return Math.max(0, ...terms.map((term) => {
@@ -60,7 +63,7 @@ export function selectPlaceTags(tags: TagRef[], queries: string[]): TagRef[] {
     const key = /wifi|wirelessinternet/.test(name) ? "wifi" : name;
     if (!unique.has(key)) unique.set(key, tag);
   }
-  return [...unique.values()].slice(0, Math.min(2, queries.length));
+  return [...unique.values()].slice(0, Math.min(2, Math.max(queries.length, words.length)));
 }
 
 export async function executePlan(plan: ChangePlan, context: ToolContext, emit: (event: AgentEvent) => void): Promise<{ applied: boolean; refresh: boolean }> {
@@ -102,7 +105,7 @@ export async function executePlan(plan: ChangePlan, context: ToolContext, emit: 
     const result = await executeTool("apply_changes", { ops }, context);
     emit({ type: "trace", tool: "apply_changes", summary: result.summary });
     if (result.ops) emit({ type: "patch", ops: result.ops });
-    return { applied: !!result.ops, refresh: rankingChanged(before, context.state) || plan.ranking };
+    return { applied: !!result.ops, refresh: rankingChanged(before, context.state) };
   } catch {
     throw fail("bad_input", "Those changes could not be applied. Please rephrase the request.", 400);
   }

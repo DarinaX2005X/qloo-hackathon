@@ -10,6 +10,9 @@ type Compact = {
   p?: CompactLove[];
   nb?: string;
   dy?: 1 | 2 | 3;
+  b?: number;
+  pc?: "relaxed" | "packed";
+  sh?: number;
 };
 
 const toCompact = (l: ResolvedLove): CompactLove => ({
@@ -47,6 +50,9 @@ export function encodeState(state: ExploreState): string {
     ...(state.companion?.loves.length ? { p: state.companion.loves.map(toCompact) } : {}),
     ...(state.neighborhood ? { nb: state.neighborhood } : {}),
     ...(state.days !== 2 ? { dy: state.days } : {}),
+    ...(state.budget ? { b: state.budget } : {}),
+    ...(state.pace && state.pace !== "balanced" ? { pc: state.pace } : {}),
+    ...(state.startHour && state.startHour !== 9 ? { sh: state.startHour } : {}),
   };
   return b64urlEncode(JSON.stringify(c));
 }
@@ -63,6 +69,9 @@ export function decodeState(s: string | null | undefined): ExploreState | null {
       companion: c.p?.length ? { loves: c.p.map(fromCompact) } : null,
       neighborhood: c.nb ?? null,
       days: c.dy ?? 2,
+      budget: c.b ?? null,
+      pace: c.pc ?? "balanced",
+      startHour: c.sh ?? 9,
     });
     return parsed.success ? parsed.data : null;
   } catch {
@@ -78,4 +87,7 @@ export const emptyState = (city = "Lisbon"): ExploreState => ({
   companion: null,
   neighborhood: null,
   days: 2,
+  budget: null,
+  pace: "balanced",
+  startHour: 9,
 });

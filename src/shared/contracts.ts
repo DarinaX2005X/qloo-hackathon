@@ -26,6 +26,8 @@ export const EntityRef = z.object({
   image: z.string().optional(),
   subtitle: z.string().optional(),
   popularity: z.number().optional(),
+  /** set when this entity stands in for a genre the person typed ("jazz" → Miles Davis) */
+  via: z.string().max(60).optional(),
 });
 export type EntityRef = z.infer<typeof EntityRef>;
 
@@ -59,6 +61,12 @@ export const ExploreState = z.object({
     .optional(),
   neighborhood: z.string().nullable().optional(),
   days: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(2),
+  /** max price level for places, 1 = $ … 4 = $$$$; null = any */
+  budget: z.number().int().min(1).max(4).nullable().optional(),
+  /** how many stops a day: relaxed 4, balanced 6, packed 8 */
+  pace: z.enum(["relaxed", "balanced", "packed"]).default("balanced"),
+  /** first stop of the day, local hour */
+  startHour: z.number().int().min(6).max(12).default(9),
 });
 export type ExploreState = z.infer<typeof ExploreState>;
 
@@ -132,6 +140,9 @@ export const Place = z.object({
   description: z.string().optional(),
   mapsUrl: z.string(),
   neighborhood: z.string().optional(),
+  website: z.string().optional(),
+  /** short descriptive keywords from Qloo, most mentioned first */
+  keywords: z.array(z.string()).optional(),
 });
 export type Place = z.infer<typeof Place>;
 
@@ -191,6 +202,9 @@ export const StatePatch = z.discriminatedUnion("op", [
   z.object({ op: z.literal("set_companion"), loves: z.array(ResolvedLove).nullable() }),
   z.object({ op: z.literal("set_days"), days: z.union([z.literal(1), z.literal(2), z.literal(3)]) }),
   z.object({ op: z.literal("select_neighborhood"), id: z.string().nullable() }),
+  z.object({ op: z.literal("set_budget"), budget: z.number().int().min(1).max(4).nullable() }),
+  z.object({ op: z.literal("set_pace"), pace: z.enum(["relaxed", "balanced", "packed"]) }),
+  z.object({ op: z.literal("set_start"), hour: z.number().int().min(6).max(12) }),
 ]);
 export type StatePatch = z.infer<typeof StatePatch>;
 
@@ -210,7 +224,31 @@ export const PlacesRequest = ExploreState.extend({
   categories: z.array(Category).optional(),
 });
 export const PlacesResponse = z.object({ places: z.array(Place) });
-export const PlanRequest = ExploreState.extend({ neighborhoodIds: z.array(z.string()).min(1).max(3) });
+export const PlanRequest = ExploreState.extend({
+  neighborhoodIds: z.array(z.string()).min(1).max(3),
+  /** place ids the person removed or swapped out: never plan them */
+  exclude: z.array(z.string()).max(60).default([]),
+  /** place ids the person wants in the plan (from the shortlist); placed in fitting slots first */
+  include: z.array(z.string()).max(12).default([]),
+});
+
+/** One city scored for the same taste, for the "where should I go" comparison. */
+export const CityScore = z.object({
+  city: z.string(),
+  /** 0..1, comparable across cities: how strongly the city's places match this taste */
+  score: z.number(),
+  /** 0..1 share of the city's top places that match the taste well */
+  depth: z.number(),
+  center: z.tuple([z.number(), z.number()]),
+  topNeighborhood: z.string().nullable(),
+  topPlaces: z.array(z.object({ name: z.string(), category: Category, affinity: z.number() })).max(4),
+  matchedTags: z.array(z.string()).max(4),
+  sparse: z.boolean(),
+  error: z.string().optional(),
+});
+export type CityScore = z.infer<typeof CityScore>;
+export const CitiesRequest = z.object({ state: ExploreState, cities: z.array(z.string().min(1).max(80)).min(2).max(5) });
+export const CitiesResponse = z.object({ cities: z.array(CityScore) });
 
 export const AgentMessage = z.object({ role: z.enum(["user", "assistant"]), content: z.string() });
 export const AgentRequest = z.object({

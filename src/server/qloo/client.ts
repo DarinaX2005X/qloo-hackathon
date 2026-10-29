@@ -8,6 +8,7 @@ type QlooRuntime = {
   pending: Map<string, Promise<unknown>>;
   active: number;
   queue: (() => void)[];
+  generation?: number;
 };
 const processGlobal = globalThis as typeof globalThis & { __homingQlooRuntime?: QlooRuntime };
 const runtime: QlooRuntime = processGlobal.__homingQlooRuntime ??= { cache: new Map(), pending: new Map(), active: 0, queue: [] };
@@ -48,17 +49,22 @@ export function trimResponse(value: unknown): unknown {
   const allowed = new Set([
     "results", "entities", "tags", "heatmap", "entity_id", "id", "tag_id", "name", "type", "types", "subtype",
     "properties", "location", "latitude", "longitude", "lat", "lon", "geohash", "query", "popularity", "affinity",
-    "image", "images", "url", "short_description", "neighborhood", "geocode", "hours", "price_level", "address",
+    "image", "images", "url", "website", "description", "short_description", "neighborhood", "geocode", "hours", "price_level", "address", "weight",
     "keywords", "count", "parents", "is_closed", "primary_genre", "opens", "closes", "closed",
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
   ]);
   return Object.fromEntries(Object.entries(record(value)).filter(([key]) =>
     allowed.has(key) || /^entity_\w+_affinity$/.test(key),
-  ).map(([key, item]) => [key, trimResponse(item)]));
+  ).map(([key, item]) => [key, key === "description" && typeof item === "string" ? item.slice(0, 160) : trimResponse(item)]));
 }
 
 export function clearQlooCache(): void {
   cache.clear();
+  runtime.generation = (runtime.generation ?? 0) + 1;
+}
+
+export function qlooCacheGeneration(): number {
+  return runtime.generation ?? 0;
 }
 
 export async function acquireQlooSlot(): Promise<void> {
@@ -93,6 +99,7 @@ export async function fetchQlooAttempt(url: URL, apiKey: string): Promise<{ stat
 export async function fetchQloo(url: URL, apiKey: string): Promise<unknown> {
   let quotaRetries = 0;
   let serverRetries = 0;
+  let networkRetries = 0;
   while (true) {
     try {
       const response = await fetchQlooAttempt(url, apiKey);
@@ -113,6 +120,8 @@ export async function fetchQloo(url: URL, apiKey: string): Promise<unknown> {
     } catch (error) {
       const parsed = ApiError.safeParse(error);
       if (parsed.success) throw parsed.data;
+      // a dropped connection or one slow answer is usually fine the second time
+      if (networkRetries++ < 1) continue;
       throw apiError("qloo_unavailable", "Qloo is unavailable or the request timed out.", true);
     }
   }

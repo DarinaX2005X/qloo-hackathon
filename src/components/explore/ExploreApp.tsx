@@ -3,14 +3,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { Check, Link2 } from "lucide-react";
+import { Check, GitCompareArrows, Link2 } from "lucide-react";
 import { activeLoves } from "@/shared/contracts";
 import { ExploreProvider, useExplore } from "./store";
 import { TastePanel } from "./TastePanel";
 import { ResultsPanel } from "./ResultsPanel";
 import { TerrainMap } from "@/components/map/TerrainMap";
+import { CompareCities } from "./CompareCities";
+import { Toast } from "./Toast";
+import { MapLegend } from "./MapLegend";
 import { LogoMark } from "@/components/brand/Logo";
-import { CityPicker } from "@/components/ui/CityPicker";
+import { CityPicker, cityName } from "@/components/ui/CityPicker";
 import { Button, Dial, Segmented, Spinner } from "@/components/ui/primitives";
 
 function useIsMobile() {
@@ -83,7 +86,7 @@ function Status() {
           exit={{ opacity: 0, y: -6 }}
           className="pointer-events-none absolute left-1/2 top-[84px] z-20 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink px-3.5 py-2 text-[13px] font-[540] text-paper shadow-[var(--shadow-raised)]"
         >
-          <Spinner size={13} /> {label} in {ex.state.city}
+          <Spinner size={13} /> {label} in {cityName(ex.state.city)}
         </motion.div>
       )}
     </AnimatePresence>
@@ -94,6 +97,20 @@ function Workspace() {
   const ex = useExplore();
   const mobile = useIsMobile();
   const [tab, setTab] = useState<"taste" | "places">("taste");
+  const [comparing, setComparing] = useState(false);
+  const onClickTerrain = useCallback(
+    ([lon, lat]: [number, number]) => {
+      const hoods = ex.hoods.data ?? [];
+      if (!hoods.length) return;
+      const k = Math.cos((lat * Math.PI) / 180);
+      const near = [...hoods].sort((a, b) => Math.hypot((a.center[0] - lon) * k, a.center[1] - lat) - Math.hypot((b.center[0] - lon) * k, b.center[1] - lat))[0];
+      ex.setOpenPlace(null);
+      ex.patch([{ op: "select_neighborhood", id: near.id }]);
+      if (mobile) setTab("places");
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ex.hoods.data, mobile],
+  );
   const pair = !!ex.state.companion && activeLoves(ex.state.companion.loves).length > 0;
   const onSelect = useCallback((id: string | null) => ex.patch([{ op: "select_neighborhood", id }]), [ex]);
   const loveNames = useMemo(() => Object.fromEntries(activeLoves(ex.state.loves).map((l) => [l.chosen.domain, l.chosen.name])), [ex.state.loves]);
@@ -122,6 +139,7 @@ function Workspace() {
           places={mapPlaces}
           activePlaceId={ex.activePlace}
           onHoverPlace={ex.setActivePlace}
+          onClickTerrain={onClickTerrain}
           route={route}
           loveNames={loveNames}
           padding={mobile ? { top: 76, bottom: Math.round((typeof window !== "undefined" ? window.innerHeight : 800) * 0.52) + 16, left: 24, right: 24 } : { top: 90, bottom: 40, left: 420, right: 460 }}
@@ -140,10 +158,23 @@ function Workspace() {
             <DiscoveryControl />
           </div>
         )}
-        <div className="ml-auto">{!mobile && <ShareButton />}</div>
+        <div className="ml-auto flex items-center gap-2">
+          <Button variant="secondary" size="md" onClick={() => setComparing(true)} aria-label="Compare cities">
+            <GitCompareArrows size={16} strokeWidth={1.9} />
+            {!mobile && "Compare cities"}
+          </Button>
+          {!mobile && <ShareButton />}
+        </div>
       </header>
 
       <Status />
+      <Toast />
+      <AnimatePresence>{comparing && <CompareCities onClose={() => setComparing(false)} />}</AnimatePresence>
+      {!mobile && ex.field.data && (
+        <div className="absolute bottom-4 left-[412px] z-10">
+          <MapLegend pair={pair} />
+        </div>
+      )}
 
       {!mobile ? (
         <>

@@ -4,6 +4,7 @@ import { qlooDomain } from "@/server/qloo/domains";
 import { signals } from "./signals";
 import { focusRadius, haversine, mean, percentileRanks } from "./geo";
 import { cityCenter } from "./city";
+import { getCityEvidence } from "./evidence";
 
 export type HeatCell = { h: string; lat: number; lon: number; affinity: number; popularity: number; affinities: Partial<Record<Domain, number>> };
 export type LoveMap = { love: ReturnType<typeof activeLoves>[number]; cells: HeatCell[] };
@@ -17,7 +18,7 @@ export function heatCell(row: QlooRecord): HeatCell | null {
   const h = string(location.geohash);
   const lat = number(location.latitude, NaN);
   const lon = number(location.longitude, NaN);
-  if (!h || h.length !== 6 || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  if (!h || h.length < 6 || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
   const affinities: HeatCell["affinities"] = {};
   for (const domain of DOMAINS) {
     const value = query[`entity_${qlooDomain(domain)}_affinity`] ?? query[`entity_${domain}_affinity`];
@@ -26,13 +27,43 @@ export function heatCell(row: QlooRecord): HeatCell | null {
   return { h, lat, lon, affinity: unit(query.affinity), popularity: unit(query.popularity), affinities };
 }
 
+/**
+ * Qloo answers a heatmap with geohash-7 cells (~150 m) around a point. The engine and the map work on
+ * geohash-6 (~1.2 x 0.6 km), so finer cells are folded into their parent: coordinates and scores are means.
+ */
+export function foldCells(cells: HeatCell[]): HeatCell[] {
+  const groups = new Map<string, HeatCell[]>();
+  for (const cell of cells) {
+    const key = cell.h.slice(0, 6);
+    const group = groups.get(key);
+    if (group) group.push(cell);
+    else groups.set(key, [cell]);
+  }
+  return [...groups].map(([h, group]) => {
+    if (group.length === 1) return { ...group[0], h };
+    const affinities: HeatCell["affinities"] = {};
+    for (const domain of DOMAINS) {
+      const values = group.flatMap((cell) => cell.affinities[domain] ?? []);
+      if (values.length) affinities[domain] = mean(values);
+    }
+    return { h, lat: mean(group.map((cell) => cell.lat)), lon: mean(group.map((cell) => cell.lon)),
+      affinity: mean(group.map((cell) => cell.affinity)), popularity: mean(group.map((cell) => cell.popularity)), affinities };
+  });
+}
+
+/** Radius around the city centre that the heatmap covers; matches the widest focus radius. */
+export const HEAT_RADIUS = 15000;
+
 export async function heatmap(city: string, loves: ResolvedLove[], tagId?: string): Promise<HeatCell[]> {
   const signal = tagId ? { "signal.interests.tags": tagId } : signals(loves);
   if (!tagId && !activeLoves(loves).length) return [];
+  // A point and radius, not the city name: by name Qloo picks the grid size per place
+  // ("Tokyo" comes back as 5 km cells across the prefecture), around a point it is always the same.
+  const center = await cityCenter(city);
   const response = await qlooGet("/v2/insights", {
-    "filter.type": "urn:heatmap", "filter.location.query": city, ...signal, take: 50,
+    "filter.type": "urn:heatmap", "filter.location": `POINT(${center[0]} ${center[1]})`, "filter.location.radius": HEAT_RADIUS, ...signal, take: 50,
   });
-  return resultRows(response, "heatmap").map(heatCell).filter((cell): cell is HeatCell => cell !== null);
+  return foldCells(resultRows(response, "heatmap").map(heatCell).filter((cell): cell is HeatCell => cell !== null));
 }
 
 export async function loadLoveMaps(city: string, loves: ResolvedLove[]): Promise<LoveMap[]> {
@@ -114,6 +145,8 @@ export async function buildField(state: ExploreState): Promise<TasteField> {
     cityCenter(state.city), loadPersonMaps(state.city, state.loves),
     state.companion ? loadPersonMaps(state.city, state.companion.loves) : undefined,
     Promise.all(state.refinements.map((tag) => heatmap(state.city, [], tag.id))),
+    // Warm the next pipeline stage; a failed prefetch must not hide an otherwise usable field.
+    getCityEvidence(state).catch(() => undefined),
   ]);
   // Combined maps supply shared coordinates/popularity; individual maps extend sparse coverage.
   const all = new Map<string, HeatCell>();

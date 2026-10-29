@@ -6,7 +6,7 @@ import { ArrowUp, Check } from "lucide-react";
 import { useExplore } from "./store";
 import { Spinner } from "@/components/ui/primitives";
 
-const SUGGESTIONS = ["Less touristy", "I work from cafés", "Only 2 days, near the water", "Add my partner: techno and Succession"];
+const SUGGESTIONS = ["Less touristy", "On a budget, I sleep late", "I work from cafés", "Add my partner: techno and Succession"];
 
 /** Conversation with the agent. Tool calls show as they happen, and their changes land on the map. */
 export function AgentChat({ compact = false }: { compact?: boolean }) {
@@ -33,7 +33,7 @@ export function AgentChat({ compact = false }: { compact?: boolean }) {
                 key={t.id}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="ml-auto w-fit max-w-[85%] rounded-[14px] rounded-br-[6px] bg-ink px-3 py-2 text-[14px] leading-snug text-paper"
+                className="ml-auto w-fit max-w-[85%] whitespace-pre-wrap rounded-[14px] rounded-br-[6px] bg-ink px-3 py-2 text-[14px] leading-snug text-paper [overflow-wrap:anywhere]"
               >
                 {t.text}
               </motion.p>
@@ -57,7 +57,7 @@ export function AgentChat({ compact = false }: { compact?: boolean }) {
                     <Spinner size={13} /> Working on it
                   </div>
                 )}
-                {t.text && <p className="text-[14px] leading-relaxed text-ink">{t.text}</p>}
+                {t.text && <p className="text-[14px] leading-relaxed text-ink [overflow-wrap:anywhere]">{t.text}</p>}
                 {t.error && <p className="text-[13px] text-err">{t.error}</p>}
               </motion.div>
             ),
@@ -88,6 +88,7 @@ export function AgentChat({ compact = false }: { compact?: boolean }) {
           data-testid="agent-input"
           rows={1}
           value={text}
+          maxLength={1000}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) (e.preventDefault(), send(text));
@@ -95,6 +96,7 @@ export function AgentChat({ compact = false }: { compact?: boolean }) {
           placeholder="Ask Homing to adjust the map"
           className="max-h-28 min-h-[36px] flex-1 resize-none bg-transparent py-2 text-[14.5px] leading-snug text-ink outline-none placeholder:text-ink-3"
         />
+        {text.length > 800 && <span className="tnum self-center text-[12px] text-ink-3">{1000 - text.length}</span>}
         <button
           type="submit"
           disabled={!text.trim() || agentBusy}

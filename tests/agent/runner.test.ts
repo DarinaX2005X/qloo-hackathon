@@ -13,7 +13,7 @@ vi.mock("@/server/qloo", () => ({ searchEntities: vi.fn(), searchPlaceTags: vi.f
 vi.mock("@/server/engine", () => ({ rankNeighborhoods: vi.fn() }));
 vi.mock("@/server/agent/plan", () => ({ makePlan: vi.fn(), executePlan: vi.fn() }));
 const model = vi.mocked(chat);
-const state = { city: "Berlin", loves: [], refinements: [], discovery: 0.35, days: 3 as const };
+const state = AgentRequest.shape.state.parse({ city: "Berlin", loves: [], refinements: [], discovery: 0.35, days: 3 });
 const neighborhood: Neighborhood = { id: "n1", name: "Kreuzberg", center: [13.4, 52.5], rank: 1, score: 0.8, you: 0.8, drivers: [], matchedTags: [], vibe: "local", samplePlaces: [], cellIds: [] };
 
 export async function* reply(chunks: ChatChunk[]): AsyncGenerator<ChatChunk> { for (const chunk of chunks) yield chunk; }

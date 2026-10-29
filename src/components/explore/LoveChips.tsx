@@ -23,6 +23,7 @@ export const DOMAIN_NAME: Record<Domain, string> = {
 };
 
 type Ink = "you" | "them";
+const squash = (t: string) => t.normalize("NFKD").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 
 export function LoveChip({
   love,
@@ -30,6 +31,7 @@ export function LoveChip({
   onRemove,
   onChoose,
   onWeight,
+  onOpen,
   noGeo,
 }: {
   love: ResolvedLove;
@@ -37,6 +39,8 @@ export function LoveChip({
   onRemove: () => void;
   onChoose: (id: string) => void;
   onWeight: (w: number) => void;
+  /** a shared link carries only the chosen match; the menu fetches the alternatives again */
+  onOpen?: () => void;
   noGeo?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -44,13 +48,28 @@ export function LoveChip({
   const pop = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number; up: boolean } | null>(null);
   useEffect(() => {
+    if (open && love.candidates.length <= 1) onOpen?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  // keyboard: opening the menu moves focus into it, closing returns it to the chip
+  const chip = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => pop.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true }), 30);
+    return () => clearTimeout(t);
+  }, [open]);
+  useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
       const t = e.target as Node;
       if (!ref.current?.contains(t) && !pop.current?.contains(t)) setOpen(false);
     };
     const shut = () => setOpen(false);
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      chip.current?.focus({ preventScroll: true });
+    };
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", esc);
     window.addEventListener("resize", shut);
@@ -73,6 +92,8 @@ export function LoveChip({
   }, [open, love]);
 
   const c = love.chosen;
+  // "jazz" becomes Miles Davis; the chip keeps saying what the person typed
+  const standsFor = c && !squash(c.name).includes(squash(love.query)) && !squash(love.query).includes(squash(c.name)) ? love.query : null;
   const inkColor = ink === "you" ? "var(--you)" : "var(--them)";
   const dim = love.weight < 1;
   return (
@@ -87,8 +108,10 @@ export function LoveChip({
       style={{ transformPerspective: 600 }}
     >
       <button
+        ref={chip}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
+        aria-haspopup="dialog"
         className={`group flex h-11 max-w-[260px] items-center gap-2 rounded-[12px] bg-paper-raised py-1 pl-1 pr-2.5 text-left shadow-[var(--shadow-rest),var(--highlight)] ring-1 transition-[transform,box-shadow] duration-150 hover:-translate-y-px hover:shadow-[var(--shadow-raised)] active:scale-[0.98] ${c ? "ring-line" : "ring-[color-mix(in_oklch,var(--warn)_60%,transparent)]"}`}
       >
         {c?.image ? (
@@ -103,6 +126,7 @@ export function LoveChip({
           <span className="block truncate text-[14px] font-[580] leading-tight text-ink">{c?.name ?? love.query}</span>
           <span className="block truncate text-[12px] leading-tight text-ink-3">
             {c ? DOMAIN_NAME[c.domain] : "Not in the taste graph"}
+            {standsFor ? `, for ${standsFor}` : ""}
             {c && noGeo ? ", not on the map" : ""}
             {dim ? `, ${Math.round(love.weight * 100)}%` : ""}
           </span>
@@ -125,7 +149,13 @@ export function LoveChip({
           >
             {c && (
               <>
-                {c.subtitle && <p className="mb-3 text-[13px] leading-snug text-ink-2">{c.subtitle}</p>}
+                {c.via ? (
+                  <p className="mb-3 text-[13px] leading-snug text-ink-2">
+                    Qloo has no single entity for {c.via.toLowerCase()}, so its best-known artist carries it on the map. Pick another below.
+                  </p>
+                ) : (
+                  c.subtitle && <p className="mb-3 text-[13px] leading-snug text-ink-2">{c.subtitle}</p>
+                )}
                 <p className="mb-1.5 text-[12px] font-[560] text-ink-3">How much it counts</p>
                 <div className="mb-3 flex gap-1">
                   {[0.35, 0.65, 1].map((w) => (
@@ -155,7 +185,7 @@ export function LoveChip({
                         className={`flex w-full items-center gap-2 rounded-[9px] px-2 py-1.5 text-left text-[13.5px] hover:bg-paper-sunk ${x.id === c?.id ? "bg-paper-sunk" : ""}`}
                       >
                         <span className="min-w-0 flex-1 truncate text-ink">{x.name}</span>
-                        <span className="shrink-0 text-[12px] text-ink-3">{DOMAIN_NAME[x.domain]}</span>
+                        <span className="shrink-0 text-[12px] text-ink-3">{x.via ? `${x.via}, ${DOMAIN_NAME[x.domain]}` : DOMAIN_NAME[x.domain]}</span>
                       </button>
                     </li>
                   ))}
@@ -222,7 +252,7 @@ export function LoveInput({
     r.readAsDataURL(f);
   };
   const submit = () => {
-    const parts = text.split(/,|\n/).map((s) => s.trim()).filter(Boolean);
+    const parts = text.split(/,|\n/).map((s) => s.trim().slice(0, 120)).filter(Boolean);
     parts.slice(0, LIMITS.loves - count).forEach(onAdd);
     setText("");
   };
@@ -244,6 +274,7 @@ export function LoveInput({
         value={text}
         disabled={full}
         autoFocus={autoFocus}
+        maxLength={600}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.preventDefault(), submit());

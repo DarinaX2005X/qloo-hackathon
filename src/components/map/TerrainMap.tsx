@@ -16,6 +16,8 @@ export type TerrainMapProps = {
   places?: Place[];
   activePlaceId?: string | null;
   onHoverPlace?: (id: string | null) => void;
+  /** a click on the terrain, with the map coordinate */
+  onClickTerrain?: (lngLat: [number, number]) => void;
   route?: [number, number][];
   /** "hero" slowly orbits and ignores input; "work" is the interactive workspace map */
   variant?: "hero" | "work";
@@ -47,6 +49,7 @@ export function TerrainMap({
   places = [],
   activePlaceId = null,
   onHoverPlace,
+  onClickTerrain,
   route,
   variant = "work",
   padding = { top: 40, bottom: 40, left: 40, right: 40 },
@@ -137,6 +140,8 @@ export function TerrainMap({
             if (cell) setHover({ x: e.point.x, y: e.point.y, cell, props });
           });
           map.on("mouseleave", LAYER, () => setHover(null));
+          map.on("click", LAYER, (e) => clickRef.current?.([e.lngLat.lng, e.lngLat.lat]));
+          map.on("mouseenter", LAYER, () => (map.getCanvas().style.cursor = "pointer"));
           map.on("mouseenter", "places-dot", (e) => {
             map.getCanvas().style.cursor = "pointer";
             const id = e.features?.[0]?.properties?.id as string | undefined;
@@ -166,12 +171,21 @@ export function TerrainMap({
   cellsRef.current = cellsByH;
   const hoverPlaceRef = useRef(onHoverPlace);
   hoverPlaceRef.current = onHoverPlace;
+  const clickRef = useRef(onClickTerrain);
+  clickRef.current = onClickTerrain;
 
   const hexes = useMemo(() => (field ? buildHexes(focused, { mode }) : null), [field, focused, mode]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!ready || !map || !hexes) return;
+    if (!ready || !map) return;
+    if (!hexes) {
+      // no field (another city is loading or failed): never leave the last city's terrain standing
+      (map.getSource(SRC) as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: [] });
+      prevHeights.current = new Map();
+      fittedFor.current = null;
+      return;
+    }
     const prev = prevHeights.current;
     const isRise = prev.size === 0;
     const next = new Map<string, number>();
@@ -282,7 +296,7 @@ export function TerrainMap({
     const sel = neighborhoods.find((n) => n.id === selectedId);
     if (sel) {
       map.flyTo({ center: sel.center, zoom: 14.2, pitch: 56, duration: 1300, padding, essential: true });
-      map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.22);
+      map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.12);
     } else {
       map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.94);
     }

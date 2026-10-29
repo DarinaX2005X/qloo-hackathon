@@ -7,6 +7,15 @@ import { asFailure, fail, withSignal } from "./errors";
 import type { ChatTool } from "./llm";
 import { rankingChanged } from "./final";
 
+// filler words, and kinds of place the plan already covers by category (cafes, bars), so the tags carry the rest
+const STOP = new Set(["the", "and", "with", "near", "for", "from", "that", "this", "some", "place", "places", "spot", "spots", "find", "want", "like", "good", "nice", "lots", "more", "less", "very", "really",
+  "cafe", "cafes", "café", "cafés", "coffee", "bar", "bars", "restaurant", "restaurants", "food", "eat", "drink", "drinks"]);
+
+/** The separate ideas inside a place request, at most four. */
+export function placeWords(text: string): string[] {
+  return [...new Set(text.toLowerCase().split(/[^\p{L}]+/u).filter((word) => word.length >= 3 && !STOP.has(word)))].slice(0, 4);
+}
+
 export const ToolArguments = {
   search_entities: z.strictObject({ name: z.string().trim().min(1).max(120), domain: Domain.optional(), reference_for: z.string().trim().min(1).max(120).optional() }),
   search_place_tags: z.strictObject({ text: z.string().trim().min(1).max(120) }),
@@ -17,8 +26,8 @@ export const ToolArguments = {
 
 export const AGENT_TOOLS: ChatTool[] = [
   { name: "search_entities", description: "Look up a named favourite. For a genre/scene choose 1–2 well-known representatives and look them all up in parallel, setting reference_for to the original genre. Use domain artist for music and tv_show for TV. Preserve returned id/name/domain in patches; omit optional metadata and use candidates:[]." },
-  { name: "search_place_tags", description: "Find supported place tags for a preference, e.g. laptop friendly, wifi, coffee. Use returned tag objects verbatim." },
-  { name: "apply_changes", description: "Atomically validate and apply state patches. Resolve new entities/tags with search first. Patches are the only way to change state." },
+  { name: "search_place_tags", description: "Find supported place tags for ONE preference, e.g. quiet, waterfront, laptop friendly, wifi. Search each idea separately in parallel. Use returned tag objects verbatim." },
+  { name: "apply_changes", description: "Atomically validate and apply StatePatch ops, including set_budget(budget:1..4|null), set_pace(pace:relaxed|balanced|packed), set_start(hour:6..12), remove_love(query), set_weight(query,weight:0..1). Budget/pace/start/days change plans without reranking. Resolve only NEW entities/tags with search first. Patches are the only way to change state." },
   { name: "get_ranking", description: "Build the taste field and rank up to eight neighborhoods using the latest state. Call after changes when a recommendation is needed." },
   { name: "explain_neighborhood", description: "Return evidence for a neighborhood from the current ranking; never invent a neighborhood id." },
 ].map(({ name, description }) => ({
@@ -88,7 +97,7 @@ export function validateChanges(ops: StatePatch[], context: ToolContext): void {
     if (op.op === "add_refinement" && !context.state.refinements.some((tag) => tag.id === op.tag.id)) additions.add(op.tag.id);
   }
   if (additions.size > 2) throw fail("bad_input", "Add at most two new place preferences per request. Choose laptop friendly, free wifi or cafe when relevant.", 400);
-  const changedProfile = JSON.stringify(applyPatches(context.state, ops.filter((op) => op.op !== "select_neighborhood"))) !== JSON.stringify(context.state);
+  const changedProfile = rankingChanged(context.state, applyPatches(context.state, ops.filter((op) => op.op !== "select_neighborhood")));
   for (const op of ops) {
     if (op.op === "set_city" && !op.city.trim()) throw fail("bad_input", "A city needs a name.", 400);
     if (op.op === "add_love") validateLove(op.love, context);
@@ -133,7 +142,14 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
     case "search_place_tags": {
       const { text } = ToolArguments.search_place_tags.parse(input);
       let results: TagRef[];
-      try { results = z.array(TagRef).parse(await withSignal(searchPlaceTags(text), context.signal)); }
+      try {
+        results = z.array(TagRef).parse(await withSignal(searchPlaceTags(text), context.signal));
+        // Qloo tags are single ideas: "quiet cafe waterfront" finds nothing, "quiet" and "waterfront" do
+        const words = placeWords(text);
+        if (!results.length && words.length > 1)
+          results = (await Promise.all(words.map((word) => withSignal(searchPlaceTags(word), context.signal).catch(() => [] as TagRef[]))))
+            .flatMap((found) => z.array(TagRef).parse(found).slice(0, 15));
+      }
       catch (error) { throw asFailure(error, "qloo"); }
       for (const tag of results) context.tags.set(tag.id, tag);
       return { summary: `Looked for places matching “${text}”`, value: { results } };

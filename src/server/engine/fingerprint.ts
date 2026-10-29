@@ -24,7 +24,7 @@ export function placeTasteTag(tag: TagRef): boolean {
 }
 
 /** Count a matching name at most once per venue, even across ambience/decor namespaces. */
-export function matchedPlaceTags(places: QlooRecord[], desired: TagRef[], tasteOnly = true): string[] {
+export function matchedPlaceTags(places: QlooRecord[], desired: TagRef[], tasteOnly = true, limit = 3): string[] {
   const wanted = new Map<string, { name: string; order: number; priority: number }>();
   desired.filter(meaningfulTag).forEach((tag, order) => {
     const key = tagName(tag.name);
@@ -37,7 +37,7 @@ export function matchedPlaceTags(places: QlooRecord[], desired: TagRef[], tasteO
     for (const name of names) if (wanted.has(name)) counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   return [...counts].sort(([a, ca], [b, cb]) => wanted.get(a)!.priority - wanted.get(b)!.priority || cb - ca || wanted.get(a)!.order - wanted.get(b)!.order)
-    .slice(0, 3).map(([name]) => wanted.get(name)!.name);
+    .slice(0, limit).map(([name]) => wanted.get(name)!.name);
 }
 
 export async function fingerprintTags(loves: ResolvedLove[], refinements: TagRef[] = []): Promise<TagRef[]> {

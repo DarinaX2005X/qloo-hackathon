@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  CityScore,
   ApiError,
   Category,
   Domain,
@@ -75,8 +76,10 @@ export const api = {
   fingerprint: (s: ExploreState, signal?: AbortSignal) => call<Fingerprint>("/api/fingerprint", { json: s, signal }),
   places: (s: ExploreState, neighborhoodId: string, categories?: Category[], signal?: AbortSignal) =>
     call<{ places: Place[] }>("/api/places", { json: { ...s, neighborhoodId, categories }, signal }).then((r) => r.places),
-  plan: (s: ExploreState, neighborhoodIds: string[], signal?: AbortSignal) =>
-    call<Itinerary>("/api/plan", { json: { ...s, neighborhoodIds }, signal }),
+  plan: (s: ExploreState, neighborhoodIds: string[], opts: { exclude?: string[]; include?: string[] } = {}, signal?: AbortSignal) =>
+    call<Itinerary>("/api/plan", { json: { ...s, neighborhoodIds, exclude: opts.exclude ?? [], include: opts.include ?? [] }, signal }),
+  cities: (s: ExploreState, cities: string[], signal?: AbortSignal) =>
+    call<{ cities: CityScore[] }>("/api/cities", { json: { state: s, cities }, signal }).then((r) => r.cities),
 };
 
 /** Streams the agent. Calls onEvent for every server-sent event until done or error. */
