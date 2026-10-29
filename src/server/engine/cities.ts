@@ -2,6 +2,7 @@ import { activeLoves, ApiError, apiError, type CityScore, type ExploreState, typ
 import { qlooGet, record, records, resultRows, string, unit, type QlooRecord } from "@/server/qloo/client";
 import { tagRef } from "@/server/qloo/search";
 import { cityCenter } from "./city";
+import { HEAT_RADIUS } from "./field";
 import { buildFingerprint, matchedPlaceTags, tagName } from "./fingerprint";
 import { bestCategory } from "./places";
 import { neighborhoodName, normalizedAreaName } from "./neighborhoods";
@@ -61,15 +62,11 @@ export function cityScoreFromRows(city: string, rows: QlooRecord[], center: [num
 }
 
 export async function scoreCity(state: ExploreState, city: string, fingerprint: TagRef[]): Promise<CityScore> {
-  const [response, center] = await Promise.all([
-    qlooGet("/v2/insights", { "filter.type": "urn:entity:place", "filter.location.query": city,
-      ...signals([...state.loves, ...(state.companion?.loves ?? [])]), take: 50 }),
-    cityCenter(city).catch((error: unknown) => {
-      const parsed = ApiError.safeParse(error);
-      if (parsed.success && parsed.data.error.code === "not_found") return [0, 0] as [number, number];
-      throw error;
-    }),
-  ]);
+  // around the centre, like the map: a place query by a big city's name ("New York") can outlast the timeout
+  const center = await cityCenter(city);
+  const response = await qlooGet("/v2/insights", { "filter.type": "urn:entity:place",
+    "filter.location": `POINT(${center[0]} ${center[1]})`, "filter.location.radius": HEAT_RADIUS,
+    ...signals([...state.loves, ...(state.companion?.loves ?? [])]), take: 50 });
   const score = cityScoreFromRows(city, resultRows(response, "entities"), center, fingerprint);
   if (score.error) return score;
   // the same neighborhood ranking the map uses, so "start in X" matches what opening the city shows
