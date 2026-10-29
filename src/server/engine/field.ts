@@ -37,12 +37,16 @@ export async function heatmap(city: string, loves: ResolvedLove[], tagId?: strin
 
 export async function loadLoveMaps(city: string, loves: ResolvedLove[]): Promise<LoveMap[]> {
   // Each URL depends only on city + entity id, so profile edits reuse previous Qloo cache entries.
-  return Promise.all(activeLoves(loves).map(async (love) => ({ love, cells: await heatmap(city, [love]) })));
+  // A love Qloo can't map (an obscure namesake, a game) contributes nothing instead of failing the field.
+  return Promise.all(activeLoves(loves).map(async (love) => ({ love, cells: await heatmap(city, [love]).catch(() => []) })));
 }
 
 export async function loadPersonMaps(city: string, loves: ResolvedLove[]): Promise<PersonMaps> {
-  const [combined, individual] = await Promise.all([heatmap(city, loves), loadLoveMaps(city, loves)]);
-  return { combined, individual };
+  const [combined, individual] = await Promise.all([heatmap(city, loves).catch(() => null), loadLoveMaps(city, loves)]);
+  if (combined) return { combined, individual };
+  // Qloo rejected the joint request (one love it can't map); rebuild it from the loves that did map.
+  const mapped = individual.filter((m) => m.cells.length).map((m) => m.love);
+  return { combined: mapped.length ? await heatmap(city, mapped) : [], individual };
 }
 
 /** Rank only observed cells in the city window. Missing observations retain zero support. */

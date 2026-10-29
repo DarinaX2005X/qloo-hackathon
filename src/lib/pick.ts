@@ -9,6 +9,7 @@ export function pickEntity(query: string, results: EntityRef[]): EntityRef | nul
   const q = query.trim().toLowerCase();
   const exact = results.filter((r) => r.name.toLowerCase() === q);
   const pool = exact.length ? exact : results;
-  const score = (r: EntityRef) => (r.popularity ?? 0.5) - (PENALTY[r.domain] ?? 0);
+  // an entity without popularity or picture is usually an obscure namesake (a researcher called Wes Anderson)
+  const score = (r: EntityRef) => (r.popularity ?? 0) + (r.image ? 0.05 : 0) - (PENALTY[r.domain] ?? 0);
   return [...pool].sort((a, b) => score(b) - score(a))[0];
 }

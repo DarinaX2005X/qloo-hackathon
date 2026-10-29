@@ -13,7 +13,7 @@ import { resolveNames, useLiveField } from "./useLiveField";
 /** Renders children only once scrolled near, so the page doesn't start five maps at load. */
 function WhenNear({ children, className }: { children: React.ReactNode; className?: string }) {
   const ref = useRef<HTMLDivElement>(null);
-  const near = useInView(ref, { once: true, margin: "300px" });
+  const near = useInView(ref, { once: true, margin: "0px 0px -10% 0px" });
   return (
     <div ref={ref} className={className}>
       {near ? children : null}
@@ -144,6 +144,10 @@ function How() {
 }
 
 function TwoInks() {
+  return <TwoInksBody />;
+}
+
+function TwoInksBody() {
   const you = useResolved(["Haruki Murakami", "Radiohead", "Wes Anderson"]);
   const them = useResolved(["Peggy Gou", "Succession", "Patagonia"]);
   const { field, hoods } = useLiveField("Lisbon", you, them);
