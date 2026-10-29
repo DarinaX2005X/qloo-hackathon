@@ -8,6 +8,7 @@
 Tell Homing a few things you love. It maps where people with your taste gather in a city, picks the neighborhood that fits you and plans your first days there.</p>
 
 <p align="center">
+  <a href="https://homing-taste.vercel.app/#demo">Watch the 56-second film</a> &nbsp;&nbsp;
   <a href="https://homing-taste.vercel.app"><strong>Try it live</strong></a> &nbsp;&nbsp;
   <a href="#how-it-works">How it works</a> &nbsp;&nbsp;
   <a href="#run-it-locally">Run it locally</a>
