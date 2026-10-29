@@ -13,6 +13,8 @@ Tell Homing a few things you love. It maps where people with your taste gather i
   <a href="#run-it-locally">Run it locally</a>
 </p>
 
+<p align="center"><img src="docs/terrain.gif" width="720" alt="Four things a person loves land on Lisbon and the city rises where people with the same taste gather" /></p>
+
 ![Homing: the taste field of a Radiohead, Fleabag and Wes Anderson fan over Lisbon](docs/hero.jpg)
 
 ## The problem
