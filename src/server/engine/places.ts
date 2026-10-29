@@ -58,7 +58,7 @@ export function placeFromRow(row: QlooRecord, category: Category, tags: TagRef[]
   return { id, name, category, lon: point[0], lat: point[1], affinity: unit(record(row.query).affinity), popularity: unit(row.popularity),
     address, image: string(record(records(properties.images)[0]).url) ?? string(record(properties.image).url),
     hours: openingHours(properties.hours), priceLevel: typeof properties.price_level === "number" ? number(properties.price_level) : undefined,
-    why: [...matched, ...keywords].slice(0, 4), description: string(properties.short_description),
+    why: matched.length ? [...matched, ...keywords].slice(0, 4) : [], description: string(properties.short_description),
     mapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([name, address].filter(Boolean).join(", "))}`,
     neighborhood: neighborhoodName(row) };
 }

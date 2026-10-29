@@ -1,6 +1,6 @@
 import { type ExploreState, type Neighborhood, type ResolvedLove, type TasteField } from "@/shared/contracts";
 import { qlooGet, record, resultRows, string, unit, type QlooRecord } from "@/server/qloo/client";
-import { buildField, loadLoveMaps, loveSeries } from "./field";
+import { buildField, loadLoveMaps, loveSeries, type LoveSeries } from "./field";
 import { buildFingerprint, matchedPlaceTags } from "./fingerprint";
 import { coordinates, focusRadius, haversine, mean, median, percentileRanks } from "./geo";
 import { signals } from "./signals";
@@ -14,6 +14,24 @@ export function neighborhoodName(row: QlooRecord): string | undefined {
 
 export function neighborhoodId(city: string, name: string): string {
   return `${encodeURIComponent(city.trim().toLowerCase())}:${encodeURIComponent(name.trim().toLowerCase())}`;
+}
+
+export function normalizedAreaName(name: string): string {
+  return name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+export function neighborhoodDrivers(series: LoveSeries[], cityCells: string[], areaCells: string[]): Neighborhood["drivers"] {
+  const contributions = series.map((item) => {
+    const local = mean(areaCells.map((h) => item.values.get(h) ?? 0));
+    const baseline = median(cityCells.map((h) => item.values.get(h) ?? 0));
+    return { love: item.love, affinity: item.love.weight * local, lift: item.love.weight * Math.max(0, local - baseline) };
+  });
+  const useLift = contributions.some((item) => item.lift > 1e-9);
+  const values = contributions.map((item) => ({ ...item, value: useLift ? item.lift : item.affinity }));
+  const total = values.reduce((sum, item) => sum + item.value, 0);
+  return values.filter((item) => item.value > 0).map(({ love, value }) => ({
+    domain: love.chosen.domain, love: love.chosen.name, share: value / total,
+  })).sort((a, b) => b.share - a.share);
 }
 
 export async function cityPlaces(state: ExploreState, loves: ResolvedLove[] = state.loves): Promise<QlooRecord[]> {
@@ -41,13 +59,14 @@ export async function rankNeighborhoods(state: ExploreState, field?: TasteField)
   for (const row of [...yours, ...(theirs ?? [])]) {
     const name = neighborhoodName(row);
     const id = string(row.entity_id);
-    if (!name || !id || haversine(taste.center, coordinates(row)!) > radius) continue;
+    if (!name || !id || normalizedAreaName(name) === normalizedAreaName(state.city) ||
+      normalizedAreaName(name) === normalizedAreaName(state.city.split(",")[0]) || haversine(taste.center, coordinates(row)!) > radius) continue;
     const key = neighborhoodId(state.city, name);
     const group = groups.get(key) ?? { name, places: new Map<string, QlooRecord>() };
     group.places.set(id, row);
     groups.set(key, group);
   }
-  const centers = [...groups].filter(([, group]) => group.places.size >= 2).map(([id, group]) => ({
+  const centers = [...groups].filter(([, group]) => group.places.size >= 3).map(([id, group]) => ({
     id, name: group.name, places: [...group.places.values()], cells: [] as TasteField["cells"],
     center: [median([...group.places.values()].map((row) => coordinates(row)![0])), median([...group.places.values()].map((row) => coordinates(row)![1]))] as [number, number],
   }));
@@ -64,12 +83,7 @@ export async function rankNeighborhoods(state: ExploreState, field?: TasteField)
   const result: Neighborhood[] = centers.filter((group) => group.cells.some((cell) => cell.you > 0 || (cell.them ?? 0) > 0)).map((group) => {
     const you = 0.7 * mean(group.cells.map((cell) => cell.you).sort((a, b) => b - a).slice(0, 3)) + 0.3 * mean(group.places.map((row) => youById.get(string(row.entity_id)) ?? 0));
     const them = state.companion ? 0.7 * mean(group.cells.map((cell) => cell.them ?? 0).sort((a, b) => b - a).slice(0, 3)) + 0.3 * mean(group.places.map((row) => themById.get(string(row.entity_id)) ?? 0)) : undefined;
-    const contributions = series.map((item) => ({ love: item.love,
-      value: item.love.weight * group.cells.reduce((sum, cell) => sum + (item.values.get(cell.h) ?? 0), 0) }));
-    const total = contributions.reduce((sum, item) => sum + item.value, 0);
-    const drivers = contributions.filter((item) => item.value > 0).map(({ love, value }) => ({ domain: love.chosen.domain, share: total ? value / total : 0,
-      love: love.chosen.name,
-    })).sort((a, b) => b.share - a.share);
+    const drivers = neighborhoodDrivers(series, taste.cells.map((cell) => cell.h), group.cells.map((cell) => cell.h));
     const matchedTags = matchedPlaceTags(group.places, fingerprintTags);
     const popularity = mean(group.places.map((row) => unit(row.popularity)));
     return { id: group.id, name: group.name, center: group.center, score: them === undefined ? you : Math.min(you, them), you,

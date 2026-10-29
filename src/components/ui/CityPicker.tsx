@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
 import { MapPin } from "lucide-react";
 
@@ -35,6 +36,8 @@ export function CityPicker({
   const [text, setText] = useState(value);
   const [hi, setHi] = useState(0);
   const box = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const [pos, setPos] = useState<{ left: number; width: number; top?: number; bottom?: number; maxH: number } | null>(null);
   useEffect(() => setText(value), [value]);
 
   const q = text.trim().toLowerCase();
@@ -50,7 +53,8 @@ export function CityPicker({
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) {
+      const t = e.target as Node;
+      if (box.current && !box.current.contains(t) && !listRef.current?.contains(t)) {
         setOpen(false);
         setText(value);
       }
@@ -58,6 +62,25 @@ export function CityPicker({
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [value]);
+
+  // the list lives in a portal so a section with overflow hidden can't clip it; it opens upward when there's no room
+  useLayoutEffect(() => {
+    if (!open || !box.current) return;
+    const place = () => {
+      const r = box.current!.getBoundingClientRect();
+      const below = window.innerHeight - r.bottom - 12;
+      const above = r.top - 12;
+      const up = below < 220 && above > below;
+      setPos({ left: r.left, width: r.width, ...(up ? { bottom: window.innerHeight - r.top + 6 } : { top: r.bottom + 6 }), maxH: Math.min(288, (up ? above : below) - 6) });
+    };
+    place();
+    window.addEventListener("resize", place);
+    document.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      document.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
 
   const hero = variant === "hero";
   return (
@@ -94,16 +117,20 @@ export function CityPicker({
           spellCheck={false}
         />
       </div>
+      {typeof document !== "undefined" &&
+        createPortal(
       <AnimatePresence>
-        {open && options.length > 0 && (
+        {open && pos && options.length > 0 && (
           <motion.ul
+            ref={listRef}
             id="city-list"
             role="listbox"
             initial={{ opacity: 0, y: -4, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -4, scale: 0.98 }}
             transition={{ duration: 0.16 }}
-            className="absolute left-0 right-0 z-50 mt-1.5 max-h-72 origin-top overflow-auto rounded-[14px] bg-paper-raised p-1.5 shadow-[var(--shadow-overlay)] ring-1 ring-line"
+            style={{ left: pos?.left ?? -9999, width: pos?.width, top: pos?.top, bottom: pos?.bottom, maxHeight: pos?.maxH }}
+            className={`hm-scroll fixed z-[60] overflow-auto rounded-[14px] bg-paper-raised p-1.5 shadow-[var(--shadow-overlay)] ring-1 ring-line ${pos?.bottom !== undefined ? "origin-bottom" : "origin-top"}`}
           >
             {options.map((c, i) => (
               <li
@@ -124,7 +151,9 @@ export function CityPicker({
             ))}
           </motion.ul>
         )}
-      </AnimatePresence>
+      </AnimatePresence>,
+          document.body,
+        )}
     </div>
   );
 }

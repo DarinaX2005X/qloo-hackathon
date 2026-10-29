@@ -8,7 +8,7 @@ import type { ChatTool } from "./llm";
 import { rankingChanged } from "./final";
 
 export const ToolArguments = {
-  search_entities: z.strictObject({ name: z.string().trim().min(1).max(120), domain: Domain.optional() }),
+  search_entities: z.strictObject({ name: z.string().trim().min(1).max(120), domain: Domain.optional(), reference_for: z.string().trim().min(1).max(120).optional() }),
   search_place_tags: z.strictObject({ text: z.string().trim().min(1).max(120) }),
   apply_changes: z.strictObject({ ops: z.array(StatePatch).min(1).max(16) }),
   get_ranking: z.strictObject({}),
@@ -16,7 +16,7 @@ export const ToolArguments = {
 };
 
 export const AGENT_TOOLS: ChatTool[] = [
-  { name: "search_entities", description: "Look up a named favourite in Qloo. Preserve returned id, name and domain; the server restores authoritative metadata. With no reliable match use chosen:null and retain candidates." },
+  { name: "search_entities", description: "Look up a named favourite. For a genre/scene choose 1–2 well-known representatives and look them all up in parallel, setting reference_for to the original genre. Use domain artist for music and tv_show for TV. Preserve returned id/name/domain in patches; omit optional metadata and use candidates:[]." },
   { name: "search_place_tags", description: "Find supported place tags for a preference, e.g. laptop friendly, wifi, coffee. Use returned tag objects verbatim." },
   { name: "apply_changes", description: "Atomically validate and apply state patches. Resolve new entities/tags with search first. Patches are the only way to change state." },
   { name: "get_ranking", description: "Build the taste field and rank up to eight neighborhoods using the latest state. Call after changes when a recommendation is needed." },
@@ -31,12 +31,13 @@ export type ToolContext = {
   tags: Map<string, TagRef>;
   ranking: Neighborhood[] | null;
   addedRefinements: Set<string>;
+  references: Map<string, string>;
   signal: AbortSignal;
 };
 export type ToolResult = { summary: string; value: unknown; ops?: StatePatch[] };
 
 export function createToolContext(state: ExploreState, signal: AbortSignal): ToolContext {
-  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, addedRefinements: new Set(), signal };
+  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, addedRefinements: new Set(), references: new Map(), signal };
   for (const love of [...state.loves, ...(state.companion?.loves ?? [])]) {
     for (const entity of [...love.candidates, ...(love.chosen ? [love.chosen] : [])]) context.entities.set(entityKey(entity), entity);
   }
@@ -72,7 +73,11 @@ export function canonicalizeLove(love: ResolvedLove, context: ToolContext): Reso
 export function canonicalizeChanges(ops: StatePatch[], context: ToolContext): StatePatch[] {
   return ops.map((op) => {
     if (op.op === "add_love") return { ...op, love: canonicalizeLove(op.love, context) };
-    if (op.op === "set_companion" && op.loves) return { ...op, loves: op.loves.map((love) => canonicalizeLove(love, context)) };
+    if (op.op === "set_companion" && op.loves) {
+      const loves = op.loves.map((love) => canonicalizeLove(love, context));
+      const represented = new Set(loves.flatMap((love) => love.chosen ? [context.references.get(entityKey(love.chosen))?.toLowerCase()] : []));
+      return { ...op, loves: loves.filter((love) => love.chosen || !represented.has(love.query.toLowerCase())) };
+    }
     return op;
   });
 }
@@ -116,12 +121,15 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
   context.signal.throwIfAborted();
   switch (name) {
     case "search_entities": {
-      const { name: query, domain } = ToolArguments.search_entities.parse(input);
+      const { name: query, domain, reference_for } = ToolArguments.search_entities.parse(input);
       let results: EntityRef[];
       try { results = z.array(EntityRef).parse(await withSignal(searchEntities(query, domain), context.signal)).slice(0, 6); }
       catch (error) { throw asFailure(error, "qloo"); }
-      for (const entity of results) context.entities.set(entityKey(entity), entity);
-      return { summary: `Looked up “${query}” → ${results[0]?.domain.replaceAll("_", " ") ?? "no matches"}`, value: { results } };
+      for (const entity of results) {
+        context.entities.set(entityKey(entity), entity);
+        if (reference_for) context.references.set(entityKey(entity), reference_for);
+      }
+      return { summary: `Looked up “${query}”`, value: { results: results.map(({ id, name, domain }) => ({ id, name, domain })) } };
     }
     case "search_place_tags": {
       const { text } = ToolArguments.search_place_tags.parse(input);

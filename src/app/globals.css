@@ -118,3 +118,8 @@ textarea:focus-visible {
 .hm-plate.is-collapsed .hm-plate-name { display: none; }
 .hm-plate.is-collapsed:hover { padding: 5px 10px 5px 5px; gap: 7px; z-index: 5; }
 .hm-plate.is-collapsed:hover .hm-plate-name { display: inline; }
+
+.hm-scroll { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.hm-scroll::-webkit-scrollbar { width: 8px; }
+.hm-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; border: 2px solid var(--paper-raised); }
+.hm-scroll::-webkit-scrollbar-button { display: none; height: 0; }

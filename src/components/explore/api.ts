@@ -92,13 +92,19 @@ export async function streamAgent(
     while ((i = buf.indexOf("\n\n")) >= 0) {
       const chunk = buf.slice(0, i);
       buf = buf.slice(i + 2);
+      // SSE frame: an optional "event: <type>" line plus "data: <json>"; the type may live in either
+      let type: string | null = null;
+      let data = "";
       for (const line of chunk.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        try {
-          onEvent(JSON.parse(line.slice(5).trim()) as AgentEvent);
-        } catch {
-          /* ignore malformed line */
-        }
+        if (line.startsWith("event:")) type = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      try {
+        const body = JSON.parse(data) as Record<string, unknown>;
+        onEvent({ ...body, type: (body.type as string | undefined) ?? type } as AgentEvent);
+      } catch {
+        /* ignore malformed frame */
       }
     }
   }

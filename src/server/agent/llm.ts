@@ -15,6 +15,7 @@ export type ChatOptions = {
   tools?: ChatTool[];
   stream?: boolean;
   response_format?: { type: "json_object" };
+  max_tokens?: number;
   signal?: AbortSignal;
 };
 export type ChatResult = { content: string; tool_calls: ToolCall[] };
@@ -47,6 +48,9 @@ export async function openCompletion(options: ChatOptions, signal: AbortSignal):
         model: process.env.LLM_MODEL || "google/gemini-3.8-flash", messages: options.messages,
         tools: options.tools?.length ? options.tools : undefined,
         stream: options.stream ?? false, response_format: options.response_format,
+        reasoning: { effort: "low", exclude: true },
+        max_tokens: options.max_tokens,
+        parallel_tool_calls: options.tools?.length ? true : undefined,
       }),
     }), signal);
     if (response.status >= 500 && attempt === 0) {

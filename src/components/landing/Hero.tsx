@@ -43,6 +43,11 @@ export function Hero() {
   };
 
   const top = hoods?.slice(0, 3) ?? [];
+  const [heroPad, setHeroPad] = useState({ top: 120, bottom: 80, left: 40, right: 40 });
+  useEffect(() => {
+    const wide = window.matchMedia("(min-width: 768px)").matches;
+    setHeroPad(wide ? { top: 140, bottom: 90, left: Math.round(window.innerWidth * 0.44), right: 60 } : { top: 40, bottom: 40, left: 30, right: 30 });
+  }, []);
 
   return (
     <section className="relative isolate overflow-hidden pb-6 md:min-h-[100svh] md:pb-0">
@@ -169,9 +174,9 @@ export function Hero() {
         </div>
       </div>
       {/* the map: real taste field, bleeds off the right and bottom */}
-      <div className="relative mx-5 mt-2 h-[440px] overflow-hidden rounded-[24px] shadow-[var(--shadow-raised)] ring-1 ring-line md:absolute md:inset-0 md:left-[30%] md:-z-10 md:m-0 md:h-auto md:overflow-visible md:rounded-none md:shadow-none md:ring-0">
-        <TerrainMap field={field} neighborhoods={top} variant="hero" padding={{ top: 120, bottom: 80, left: 80, right: 60 }} />
-        <div className="pointer-events-none absolute inset-y-0 left-0 hidden w-[38%] bg-gradient-to-r from-paper via-paper/70 to-transparent md:block" />
+      <div className="relative mx-5 mt-2 h-[440px] overflow-hidden rounded-[24px] shadow-[var(--shadow-raised)] ring-1 ring-line md:absolute md:inset-0 md:-z-10 md:m-0 md:h-auto md:overflow-visible md:rounded-none md:shadow-none md:ring-0">
+        <TerrainMap field={field} neighborhoods={top} variant="hero" padding={heroPad} />
+        <div className="pointer-events-none absolute inset-y-0 left-0 hidden w-[52%] bg-gradient-to-r from-paper from-30% via-paper/75 to-transparent md:block" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 hidden h-40 bg-gradient-to-t from-paper to-transparent md:block" />
       </div>
 

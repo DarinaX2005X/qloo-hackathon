@@ -36,6 +36,7 @@ export async function heatmap(city: string, loves: ResolvedLove[], tagId?: strin
 }
 
 export async function loadLoveMaps(city: string, loves: ResolvedLove[]): Promise<LoveMap[]> {
+  // Each URL depends only on city + entity id, so profile edits reuse previous Qloo cache entries.
   return Promise.all(activeLoves(loves).map(async (love) => ({ love, cells: await heatmap(city, [love]) })));
 }
 

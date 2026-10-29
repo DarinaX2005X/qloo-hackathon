@@ -2,8 +2,9 @@
 import { qlooGet, record, records, resultRows, unit, type QlooRecord } from "@/server/qloo/client";
 import { tagRef } from "@/server/qloo/search";
 import { signals } from "./signals";
+import { specificPlaceGenre } from "./taste-tags";
 
-export const PLACE_TAG_TYPES = "urn:tag:ambience:qloo,urn:tag:decor:qloo,urn:tag:genre:place";
+export const PLACE_TAG_TYPES = ["urn:tag:ambience:qloo", "urn:tag:decor:qloo", "urn:tag:genre:place"] as const;
 
 export function tagName(name: string): string {
   return name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
@@ -24,10 +25,10 @@ export function placeTasteTag(tag: TagRef): boolean {
 
 /** Count a matching name at most once per venue, even across ambience/decor namespaces. */
 export function matchedPlaceTags(places: QlooRecord[], desired: TagRef[], tasteOnly = true): string[] {
-  const wanted = new Map<string, { name: string; order: number }>();
+  const wanted = new Map<string, { name: string; order: number; priority: number }>();
   desired.filter(meaningfulTag).forEach((tag, order) => {
     const key = tagName(tag.name);
-    if (!wanted.has(key)) wanted.set(key, { name: tag.name, order });
+    if (!wanted.has(key)) wanted.set(key, { name: tag.name, order, priority: /^(ambience|decor)$/.test(tag.kind) ? 0 : 1 });
   });
   const counts = new Map<string, number>();
   for (const place of places) {
@@ -35,21 +36,32 @@ export function matchedPlaceTags(places: QlooRecord[], desired: TagRef[], tasteO
       meaningfulTag(tag) && (!tasteOnly || placeTasteTag(tag))).map((tag) => tagName(tag.name)));
     for (const name of names) if (wanted.has(name)) counts.set(name, (counts.get(name) ?? 0) + 1);
   }
-  return [...counts].sort(([a, ca], [b, cb]) => cb - ca || wanted.get(a)!.order - wanted.get(b)!.order)
-    .slice(0, 4).map(([name]) => wanted.get(name)!.name);
+  return [...counts].sort(([a, ca], [b, cb]) => wanted.get(a)!.priority - wanted.get(b)!.priority || cb - ca || wanted.get(a)!.order - wanted.get(b)!.order)
+    .slice(0, 3).map(([name]) => wanted.get(name)!.name);
 }
 
 export async function fingerprintTags(loves: ResolvedLove[], refinements: TagRef[] = []): Promise<TagRef[]> {
   if (!activeLoves(loves).length && !refinements.length) return [];
-  const response = await qlooGet("/v2/insights", {
-    "filter.type": "urn:tag", "filter.tag.types": PLACE_TAG_TYPES, ...signals(loves, refinements), take: 50,
-  });
+  const responses = await Promise.all(PLACE_TAG_TYPES.map(async (type) => ({ type, rows: resultRows(await qlooGet("/v2/insights", {
+    "filter.type": "urn:tag", "filter.tag.types": type, ...signals(loves, refinements), take: 50,
+  }), "tags") })));
   const found = new Map<string, TagRef>();
-  const rows = resultRows(response, "tags").sort((a, b) => unit(record(b.query).affinity) - unit(record(a.query).affinity));
+  const rows = responses.flatMap(({ type, rows }) => rows.filter((row) => tagRef(row)?.id.startsWith(`${type}:`)))
+    .sort((a, b) => unit(record(b.query).affinity) - unit(record(a.query).affinity));
   for (const row of rows) {
     const tag = tagRef(row);
-    if (tag && /^urn:tag:(?:(?:ambience|decor):qloo:|genre:place:)/.test(tag.id) && meaningfulTag(tag) && !found.has(tagName(tag.name)))
+    if (tag && /^(ambience|decor)$/.test(tag.kind) && meaningfulTag(tag) && !found.has(tagName(tag.name)))
       found.set(tagName(tag.name), tag);
+    if (found.size === 8) break;
+  }
+  let genres = 0;
+  for (const row of rows) {
+    if (found.size === 10 || genres === 3) break;
+    const tag = tagRef(row);
+    if (tag && specificPlaceGenre(tag, row) && meaningfulTag(tag) && !found.has(tagName(tag.name))) {
+      found.set(tagName(tag.name), tag);
+      genres++;
+    }
   }
   return [...found.values()].slice(0, 10);
 }

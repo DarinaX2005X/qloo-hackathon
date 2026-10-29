@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearQlooCache, qlooGet } from "@/server/qloo/client";
+import { loadPersonMaps } from "@/server/engine/field";
+import { love } from "./helpers";
 
 beforeEach(() => { clearQlooCache(); vi.stubEnv("QLOO_API_KEY", "synthetic-test-key"); vi.stubEnv("QLOO_API_URL", "https://qloo.example.test"); });
-afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 describe("Qloo client", () => {
   it("sends GET with bounded take, caches projected data and coalesces concurrent queries", async () => {
@@ -19,16 +21,75 @@ describe("Qloo client", () => {
     await expect(qlooGet("/search", { take: 51 })).rejects.toMatchObject({ error: { code: "bad_input" } });
   });
 
-  it.each([429, 503])("retries %s once after 600ms and maps the error", async (status) => {
+  it("retries 503 once after 600ms and maps the error", async () => {
     vi.useFakeTimers();
-    const fetcher = vi.fn().mockImplementation(async () => new Response("upstream details", { status }));
+    const fetcher = vi.fn().mockImplementation(async () => new Response("upstream details", { status: 503 }));
     vi.stubGlobal("fetch", fetcher);
-    const assertion = expect(qlooGet("/search", { query: "x" })).rejects.toMatchObject({ error: { code: status === 429 ? "quota" : "qloo_unavailable", retryable: true } });
+    const assertion = expect(qlooGet("/search", { query: "x" })).rejects.toMatchObject({ error: { code: "qloo_unavailable", retryable: true } });
     await vi.advanceTimersByTimeAsync(599);
     expect(fetcher).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     await assertion;
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries 429 twice with 700/1500ms backoff plus jitter, then releases all slots", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const fetcher = vi.fn().mockImplementation(async () => new Response("quota", { status: 429 }));
+    vi.stubGlobal("fetch", fetcher);
+    const assertion = expect(qlooGet("/search", { query: "limited" })).rejects.toMatchObject({ error: { code: "quota", retryable: true } });
+    await vi.advanceTimersByTimeAsync(799);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1599);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    fetcher.mockImplementation(async () => Response.json({ results: [] }));
+    await Promise.all(Array.from({ length: 4 }, (_, i) => qlooGet("/search", { query: `after-${i}` })));
+    expect(fetcher).toHaveBeenCalledTimes(7);
+  });
+
+  it("limits all URLs to four active requests, coalesces queued duplicates, and reads bodies before release", async () => {
+    const finish: (() => void)[] = [];
+    let active = 0;
+    let peak = 0;
+    const fetcher = vi.fn().mockImplementation(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      return { ok: true, status: 200, json: () => new Promise((resolve) => {
+        finish.push(() => { active--; resolve({ results: [] }); });
+      }) };
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const jobs = Array.from({ length: 12 }, (_, i) => qlooGet("/search", { query: `queued-${i}` }));
+    jobs.push(qlooGet("/search", { query: "queued-10" }));
+    for (let batch = 1; batch <= 3; batch++) {
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(batch * 4));
+      expect(active).toBe(4);
+      finish.splice(0).forEach((release) => release());
+    }
+    await Promise.all(jobs);
+    expect(peak).toBe(4);
+    expect(active).toBe(0);
+    expect(fetcher).toHaveBeenCalledTimes(12);
+  });
+
+  it("reuses each city/entity heatmap when adding a fifth love", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => Response.json({ results: { heatmap: [] } }));
+    vi.stubGlobal("fetch", fetcher);
+    const four = ["a", "b", "c", "d"].map((id) => love(id));
+    await loadPersonMaps("Test City", four);
+    expect(fetcher).toHaveBeenCalledTimes(5);
+    await loadPersonMaps("Test City", [...four, love("e")]);
+    expect(fetcher).toHaveBeenCalledTimes(7);
+    const ids = fetcher.mock.calls.map(([url]) => (url as URL).searchParams.get("signal.interests.entities"));
+    for (const id of ["a", "b", "c", "d"]) expect(ids.filter((value) => value === id)).toHaveLength(1);
+    await loadPersonMaps("Other City", [four[0]]);
+    expect(fetcher).toHaveBeenCalledTimes(8);
   });
 
   it("maps network failures and invalid JSON without exposing upstream detail", async () => {

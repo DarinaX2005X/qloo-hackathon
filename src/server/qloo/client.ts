@@ -10,7 +10,7 @@ type QlooRuntime = {
   queue: (() => void)[];
 };
 const processGlobal = globalThis as typeof globalThis & { __homingQlooRuntime?: QlooRuntime };
-const runtime = processGlobal.__homingQlooRuntime ??= { cache: new Map(), pending: new Map(), active: 0, queue: [] };
+const runtime: QlooRuntime = processGlobal.__homingQlooRuntime ??= { cache: new Map(), pending: new Map(), active: 0, queue: [] };
 const { cache, pending } = runtime;
 const TTL = 604800;
 
@@ -91,15 +91,18 @@ export async function fetchQlooAttempt(url: URL, apiKey: string): Promise<{ stat
 }
 
 export async function fetchQloo(url: URL, apiKey: string): Promise<unknown> {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  let quotaRetries = 0;
+  let serverRetries = 0;
+  while (true) {
     try {
       const response = await fetchQlooAttempt(url, apiKey);
-      if (response.status === 429 && attempt < 2) {
-        const delay = [700, 1500][attempt] + Math.floor(Math.random() * 201);
+      if (response.status === 429 && quotaRetries < 2) {
+        const delay = [700, 1500][quotaRetries++] + Math.floor(Math.random() * 201);
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
-      if (response.status >= 500 && attempt === 0) {
+      if (response.status >= 500 && serverRetries < 1) {
+        serverRetries++;
         await new Promise((resolve) => setTimeout(resolve, 600));
         continue;
       }
@@ -113,7 +116,6 @@ export async function fetchQloo(url: URL, apiKey: string): Promise<unknown> {
       throw apiError("qloo_unavailable", "Qloo is unavailable or the request timed out.", true);
     }
   }
-  throw apiError("qloo_unavailable", "Qloo is unavailable.", true);
 }
 
 /** Search and tag lookup use their own filters; insights require filter.type. */

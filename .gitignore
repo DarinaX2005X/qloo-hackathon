@@ -45,5 +45,7 @@ next-env.d.ts
 # Qloo response data must not be committed
 tests/**/__fixtures__/
 tests/e2e/report/
-public/_lab/
 .claude/
+
+.vercel
+.env*

@@ -18,9 +18,13 @@ function useIsMobile() {
   useEffect(() => {
     const q = window.matchMedia("(max-width: 860px)");
     const on = () => setM(q.matches);
+    window.addEventListener("resize", on);
     on();
     q.addEventListener("change", on);
-    return () => q.removeEventListener("change", on);
+    return () => {
+      q.removeEventListener("change", on);
+      window.removeEventListener("resize", on);
+    };
   }, []);
   return m;
 }
@@ -120,7 +124,7 @@ function Workspace() {
           onHoverPlace={ex.setActivePlace}
           route={route}
           loveNames={loveNames}
-          padding={mobile ? { top: 70, bottom: 360, left: 20, right: 20 } : { top: 90, bottom: 40, left: 420, right: 460 }}
+          padding={mobile ? { top: 76, bottom: Math.round((typeof window !== "undefined" ? window.innerHeight : 800) * 0.52) + 16, left: 24, right: 24 } : { top: 90, bottom: 40, left: 420, right: 460 }}
         />
       </div>
 
@@ -161,7 +165,7 @@ function Workspace() {
           </motion.aside>
         </>
       ) : (
-        <div className="absolute inset-x-0 bottom-0 z-20 flex h-[58dvh] flex-col overflow-hidden rounded-t-[24px] bg-paper-raised shadow-[var(--shadow-overlay)] ring-1 ring-line">
+        <div className="absolute inset-x-0 bottom-0 z-20 flex h-[52dvh] flex-col overflow-hidden rounded-t-[24px] bg-paper-raised shadow-[var(--shadow-overlay)] ring-1 ring-line">
           <div className="flex items-center gap-2 px-4 pt-3">
             <Segmented
               label="Panel"

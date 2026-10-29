@@ -5,9 +5,10 @@ import { buildField, heatCell, localPercentiles } from "@/server/engine/field";
 import { buildFingerprint, matchedPlaceTags, PLACE_TAG_TYPES } from "@/server/engine/fingerprint";
 import { cityCenter } from "@/server/engine/city";
 import { percentileRanks } from "@/server/engine/geo";
-import { rankNeighborhoods } from "@/server/engine/neighborhoods";
+import { neighborhoodDrivers, rankNeighborhoods } from "@/server/engine/neighborhoods";
+import { specificPlaceGenre } from "@/server/engine/taste-tags";
 import { findPlaces, matchesCategory, openingHours, placeFromRow } from "@/server/engine/places";
-import { TasteField } from "@/shared/contracts";
+import { activeLoves, TasteField } from "@/shared/contracts";
 import { heat, love, state, venue } from "./helpers";
 
 vi.mock("@/server/qloo/client", async (original) => ({ ...await original<typeof import("@/server/qloo/client")>(), qlooGet: vi.fn() }));
@@ -57,6 +58,7 @@ describe("search and fingerprint", () => {
         { tag_id: "urn:tag:hotel_rating:place:two_star", name: "Two star", query: { affinity: 1 } },
         { tag_id: `urn:tag:${theirs ? "decor" : "ambience"}:qloo:intimate`, name: theirs ? "INTIMATE" : "Intimate", query: { affinity: 0.99 } },
         { tag_id: "urn:tag:decor:qloo:intimate", name: "Intimate", query: { affinity: 0.98 } },
+        ...Array.from({ length: 9 }, (_, i) => ({ tag_id: `urn:tag:decor:qloo:${theirs ? "theirs" : "yours"}${i}`, name: `${theirs ? "Theirs" : "Yours"}${i}`, query: { affinity: 0.97 - i / 100 } })),
         ...Array.from({ length: 12 }, (_, i) => ({ tag_id: `urn:tag:genre:place:${theirs ? "theirs" : "yours"}${i}`, name: `${theirs ? "Theirs" : "Yours"}${i}`, query: { affinity: 0.9 - i / 100 } })),
       ] } };
     });
@@ -67,7 +69,9 @@ describe("search and fingerprint", () => {
     expect(result.onlyYou).toHaveLength(6);
     expect(result.onlyThem).toHaveLength(6);
     expect(result.onlyYou?.every((tag) => tag.name.startsWith("Yours"))).toBe(true);
-    expect(get.mock.calls.every(([, params]) => params["filter.tag.types"] === PLACE_TAG_TYPES)).toBe(true);
+    expect(get.mock.calls.every(([, params]) => PLACE_TAG_TYPES.some((type) => type === params["filter.tag.types"]))).toBe(true);
+    expect(get).toHaveBeenCalledTimes(6);
+    expect(result.you.slice(0, 8).every((tag) => tag.kind === "ambience" || tag.kind === "decor")).toBe(true);
   });
 
   it("matches by name across namespaces, counts venue frequency and ignores service tags", () => {
@@ -78,7 +82,23 @@ describe("search and fingerprint", () => {
       { tags: [{ id: "urn:tag:ambience:place:cozy", name: "Cozy" }] },
       { tags: [{ id: "urn:tag:parking:place:rare", name: "Rare" }] },
     ];
-    expect(matchedPlaceTags(rows, desired)).toEqual(["Cozy", "Rare", "Intimate", "Vintage"]);
+    expect(matchedPlaceTags(rows, desired)).toEqual(["Cozy", "Rare", "Intimate"]);
+  });
+
+  it("keeps specific venues while excluding generic genres and national cuisines", () => {
+    for (const name of ["Restaurant", "Bar", "Cafe", "Coffee", "Tourist attraction", "Hotel", "Museum", "Shopping", "Park", "European", "American", "Italian", "French", "Mediterranean", "British", "Asian", "Portuguese", "German", "Spanish", "Mexican", "Japan", "Japanese restaurant", "Modern European", "New American"])
+      expect(specificPlaceGenre({ id: `urn:tag:genre:place:${name}`, name, kind: "genre" }), name).toBe(false);
+    for (const name of ["Live music bar", "Art gallery", "Gastropub", "Wine bar", "Cocktail bar", "Vinyl record store", "Book store", "Jazz club", "Concept store"])
+      expect(specificPlaceGenre({ id: `urn:tag:genre:place:${name}`, name, kind: "genre" }), name).toBe(true);
+    expect(specificPlaceGenre({ id: "urn:tag:genre:place:regional", name: "Regional", kind: "genre" }, { subtype: "urn:tag:cuisine" })).toBe(false);
+  });
+
+  it("prioritizes ambience matches over a more frequent genre and leaves no-match results empty", () => {
+    const desired = [{ id: "urn:tag:genre:place:art_gallery", name: "Art gallery", kind: "genre" }, { id: "urn:tag:decor:qloo:cozy", name: "Cozy", kind: "decor" }];
+    const rows = [{ tags: desired }, { tags: [desired[0]] }, { tags: [desired[0]] }];
+    expect(matchedPlaceTags(rows, desired)).toEqual(["Cozy", "Art gallery"]);
+    expect(matchedPlaceTags([{ tags: [{ id: "urn:tag:genre:place:restaurant", name: "Restaurant" }] }], desired)).toEqual([]);
+    expect(placeFromRow({ ...venue("unmatched", "N"), tags: [], properties: { keywords: [{ name: "Coffee", count: 10 }] } }, "coffee", desired)?.why).toEqual([]);
   });
 });
 
@@ -178,7 +198,7 @@ describe("neighborhoods and places", () => {
       if (params["filter.type"] === "urn:tag") return { results: { tags: [{ tag_id: "urn:tag:ambience:qloo:cozy", name: "Cozy", query: { affinity: 1 } }] } };
       if (params["filter.type"] === "urn:heatmap") return { results: { heatmap: [heat("aaaaaa", 1, 0, 0, 0), heat("bbbbbb", 0.5, 0, 0, 0.05)] } };
       if (!params["signal.interests.entities"]) return centerResponse;
-      return { results: { entities: params.page && params.page !== 1 ? [] : [venue("one", "Center", 0), venue("two", "Center", 0.002), venue("three", "Far", 0.05), venue("four", "Far", 0.052), venue("single", "Single", 0.1)] } };
+      return { results: { entities: params.page && params.page !== 1 ? [] : [venue("one", "Center", 0), venue("two", "Center", 0.002), venue("center-mid", "Center", 0.001), venue("three", "Far", 0.05), venue("four", "Far", 0.052), venue("far-mid", "Far", 0.051), venue("single", "Single", 0.1), venue("small1", "Small", 0.08), venue("small2", "Small", 0.081), ...[1, 2, 3].map((n) => venue(`city${n}`, " TEST CITY ", 0))] } };
     });
   });
 
@@ -193,7 +213,7 @@ describe("neighborhoods and places", () => {
   it("gets coffee near the chosen neighborhood and rejects stale ids", async () => {
     const ranked = await rankNeighborhoods(state());
     const result = await findPlaces(state(), ranked[0].id, ["coffee"]);
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(6);
     expect(result[0]).toMatchObject({ category: "coffee", why: ["Cozy", "quiet"] });
     const query = get.mock.calls.find(([, params]) => params["filter.location"]);
     expect(query?.[1]).toMatchObject({ "filter.location": "POINT(0.001 0)", "filter.location.radius": 900, take: 8 });
@@ -205,7 +225,7 @@ describe("neighborhoods and places", () => {
       if (params["filter.type"] === "urn:tag") return { results: { tags: [] } };
       if (params["filter.type"] === "urn:heatmap") return { results: { heatmap: params["signal.interests.entities"] === "first"
         ? [rawCell("aaaaaa", 1), rawCell("bbbbbb", 0.1, 0, 0.05)] : [rawCell("aaaaaa", 0.1), rawCell("bbbbbb", 1, 0, 0.05)] } };
-      return { results: { entities: params.page === 1 ? [venue("a1", "A", 0, 0.5), venue("a2", "A", 0.002, 0.5), venue("b1", "B", 0.05, 0.5), venue("b2", "B", 0.052, 0.5)] : [] } };
+      return { results: { entities: params.page === 1 ? [venue("a1", "A", 0, 0.5), venue("a2", "A", 0.002, 0.5), venue("a3", "A", 0.001, 0.5), venue("b1", "B", 0.05, 0.5), venue("b2", "B", 0.052, 0.5), venue("b3", "B", 0.051, 0.5)] : [] } };
     });
     const field: TasteField = { city: "Test City", center: [0, 0], bbox: [0, 0, 0.05, 0], sparse: true, signalsWithoutGeo: [], cells: [
       { h: "aaaaaa", lon: 0, lat: 0, you: 0.5, them: 0.6, both: 0.5, popularity: 0, drivers: {} },
@@ -215,8 +235,21 @@ describe("neighborhoods and places", () => {
     expect(result.map((area) => area.name)).toEqual(["B", "A"]);
     expect(result[0].score).toBeCloseTo(0.665);
     expect(result[1].score).toBe(result[0].score);
-    expect(result[0].drivers).toEqual([{ domain: "artist", love: "second", share: 0.75 }, { domain: "artist", love: "first", share: 0.25 }]);
+    expect(result[0].drivers).toEqual([{ domain: "artist", love: "second", share: 1 }]);
     expect(result[1].drivers[0].love).toBe("first");
+  });
+
+  it("measures lift against each city median and falls back to affinities on a flat field", () => {
+    const [first, second] = activeLoves([love("first"), love("second")]);
+    const series = [{ love: first, values: new Map([["a", 0.5], ["b", 0.6], ["c", 0.9]]) }, { love: second, values: new Map([["a", 0.1], ["b", 0.2], ["c", 0.8]]) }];
+    const lifted = neighborhoodDrivers(series, ["a", "b", "c"], ["c"]);
+    expect(lifted[0].love).toBe("second");
+    expect(lifted[0].share).toBeCloseTo(2 / 3);
+    expect(lifted[1].share).toBeCloseTo(1 / 3);
+    const flat = neighborhoodDrivers(series, ["a", "b", "c"], ["b"]);
+    expect(flat[0]).toMatchObject({ love: "first" });
+    expect(flat[0].share).toBeCloseTo(0.75);
+    expect(flat[1].share).toBeCloseTo(0.25);
   });
 
   it("limits why to taste matches and two useful keywords without duplicate names", () => {
