@@ -1,0 +1,111 @@
+@import "tailwindcss";
+@import "../styles/tokens.css";
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-paper-raised: var(--paper-raised);
+  --color-paper-sunk: var(--paper-sunk);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-you: var(--you);
+  --color-you-deep: var(--you-deep);
+  --color-you-soft: var(--you-soft);
+  --color-them: var(--them);
+  --color-them-soft: var(--them-soft);
+  --color-both: var(--both);
+  --font-sans: var(--font-geologica), ui-sans-serif, system-ui, sans-serif;
+  --radius-panel: 24px;
+  --radius-card: 18px;
+  --radius-control: 12px;
+  --radius-chip: 10px;
+  --radius-tag: 6px;
+}
+
+html {
+  background: var(--paper);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.55;
+  font-weight: 400;
+}
+
+::selection {
+  background: var(--you-soft);
+  color: var(--ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--you);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.paper-noise {
+  background-image: var(--noise);
+  background-size: 180px 180px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 11px;
+  background: color-mix(in oklch, var(--paper-raised) 80%, transparent) !important;
+  border-radius: 8px 0 0 0;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--ink-3) !important;
+}
+
+/* Neighborhood plates on the map */
+.hm-plate {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px 5px 5px;
+  border-radius: 10px;
+  background: var(--paper-raised);
+  color: var(--ink);
+  font: 550 13px/1 var(--font-sans);
+  letter-spacing: -0.01em;
+  box-shadow: var(--shadow-raised);
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), box-shadow 160ms var(--ease-out), opacity 240ms var(--ease-out);
+  white-space: nowrap;
+}
+.hm-plate:hover { transform: translateY(-2px); box-shadow: var(--shadow-overlay); }
+.hm-plate:active { transform: scale(0.97); }
+.hm-plate-rank {
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--paper-sunk);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  font-size: 12px;
+}
+.hm-plate.is-selected { background: var(--you); color: #fff; }
+.hm-plate.is-selected .hm-plate-rank { background: oklch(100% 0 0 / 0.22); }
+.hm-plate.is-dim { opacity: 0.5; }
