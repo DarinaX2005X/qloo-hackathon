@@ -45,12 +45,8 @@ function Chips({ who }: { who: "you" | "them" }) {
   );
 }
 
-function Fingerprint() {
-  const { print, state } = useExplore();
-  const pair = !!state.companion?.loves.length;
-  const p = print.data;
-  if (!p || (!p.you.length && !pair)) return null;
-  const Row = ({ title, tags, tone }: { title: string; tags?: TagRef[]; tone: "you" | "them" | "both" }) =>
+function TagRow({ title, tags, tone }: { title: string; tags?: TagRef[]; tone: "you" | "them" | "both" }) {
+  return (
     tags && tags.length ? (
       <div>
         <p className="mb-1.5 text-[12px] font-[560] text-ink-3">{title}</p>
@@ -69,17 +65,25 @@ function Fingerprint() {
           ))}
         </div>
       </div>
-    ) : null;
+    ) : null
+  );
+}
+
+function Fingerprint() {
+  const { print, state } = useExplore();
+  const pair = !!state.companion?.loves.length;
+  const p = print.data;
+  if (!p || (!p.you.length && !pair)) return null;
   return (
     <motion.div layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-3">
       {pair ? (
         <>
-          <Row title="You both lean" tags={p.shared} tone="both" />
-          <Row title="Only you" tags={p.onlyYou} tone="you" />
-          <Row title="Only them" tags={p.onlyThem} tone="them" />
+          <TagRow title="You both lean" tags={p.shared} tone="both" />
+          <TagRow title="Only you" tags={p.onlyYou} tone="you" />
+          <TagRow title="Only them" tags={p.onlyThem} tone="them" />
         </>
       ) : (
-        <Row title="Your taste reads as" tags={p.you} tone="you" />
+        <TagRow title="Your taste reads as" tags={p.you} tone="you" />
       )}
     </motion.div>
   );

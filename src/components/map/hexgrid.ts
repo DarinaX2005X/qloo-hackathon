@@ -101,7 +101,7 @@ export function buildHexes(cells: FieldCell[], opts: BuildOpts = {}): GeoJSON.Fe
     return { x, y, you: c.you, them, h: c.h };
   });
 
-  let [w, s, e, n] = opts.bbox ?? [
+  const [w, s, e, n] = opts.bbox ?? [
     Math.min(...cells.map((c) => c.lon)),
     Math.min(...cells.map((c) => c.lat)),
     Math.max(...cells.map((c) => c.lon)),

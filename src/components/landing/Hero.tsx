@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "motion/react";
 import { X } from "lucide-react";
@@ -52,10 +53,10 @@ export function Hero() {
   return (
     <section className="relative isolate overflow-hidden pb-6 md:min-h-[100svh] md:pb-0">
       <header className="mx-auto flex max-w-[1360px] items-center justify-between px-5 pt-5 md:px-10">
-        <a href="/" className="flex items-center gap-2" aria-label="Homing">
+        <Link href="/" className="flex items-center gap-2" aria-label="Homing">
           <LogoMark size={30} />
           <span className="text-[23px] font-[680] tracking-[-0.03em]">homing</span>
-        </a>
+        </Link>
         <nav className="flex items-center gap-1 rounded-[14px] bg-paper/85 p-1 text-[15px] shadow-[var(--shadow-rest)] ring-1 ring-line backdrop-blur">
           <a href="#how" className="hidden rounded-[10px] px-3 py-2 text-ink-2 hover:bg-paper-sunk hover:text-ink sm:block">
             How it works
