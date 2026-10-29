@@ -14,20 +14,25 @@ import { LogoMark } from "@/components/brand/Logo";
 import { DOMAIN_NAME } from "@/components/explore/LoveChips";
 import { emptyState, encodeState } from "@/lib/state";
 import { resolveNames, useLiveField } from "./useLiveField";
+import { useLanding } from "./LandingData";
+import { LANDING } from "./scenes";
 
-const EXAMPLE = ["Radiohead", "Fleabag", "Wes Anderson", "Patagonia"];
 
 export function Hero() {
   const router = useRouter();
-  const [city, setCity] = useState("Lisbon");
+  const { data, settled, markReady } = useLanding();
+  const [city, setCity] = useState(LANDING.hero.city);
   const [loves, setLoves] = useState<ResolvedLove[]>([]);
   const [pending, setPending] = useState<string[]>([]);
   const [text, setText] = useState("");
-  const { field, hoods, loading, error } = useLiveField(city, loves);
+  const { field, hoods, loading, error } = useLiveField(city, loves, null, true, data?.hero);
 
+  // the example taste comes ready from the server; only without it is it resolved here
   useEffect(() => {
-    resolveNames(EXAMPLE).then((r) => setLoves(r.filter((l) => l.chosen)));
-  }, []);
+    if (!settled) return;
+    if (data?.hero) setLoves(data.hero.loves);
+    else resolveNames(LANDING.hero.loves).then((r) => setLoves(r.filter((l) => l.chosen)));
+  }, [settled, data]);
 
   const add = async (q: string) => {
     const v = q.trim();
@@ -58,8 +63,14 @@ export function Hero() {
           <span className="text-[23px] font-[680] tracking-[-0.03em]">homing</span>
         </Link>
         <nav className="flex items-center gap-1 rounded-[14px] bg-paper/85 p-1 text-[15px] shadow-[var(--shadow-rest)] ring-1 ring-line backdrop-blur">
+          <a href="#demo" className="rounded-[10px] px-3 py-2 text-ink-2 hover:bg-paper-sunk hover:text-ink">
+            Demo
+          </a>
           <a href="#how" className="hidden rounded-[10px] px-3 py-2 text-ink-2 hover:bg-paper-sunk hover:text-ink sm:block">
             How it works
+          </a>
+          <a href="#features" className="hidden rounded-[10px] px-3 py-2 text-ink-2 hover:bg-paper-sunk hover:text-ink md:block">
+            Features
           </a>
           <a href="https://github.com/DarinaX2005X/qloo-hackathon" className="rounded-[10px] px-3 py-2 text-ink-2 hover:bg-paper-sunk hover:text-ink">
             Code
@@ -176,7 +187,7 @@ export function Hero() {
       </div>
       {/* the map: real taste field, bleeds off the right and bottom */}
       <div className="relative mx-5 mt-2 h-[440px] overflow-hidden rounded-[24px] shadow-[var(--shadow-raised)] ring-1 ring-line md:absolute md:inset-0 md:-z-10 md:m-0 md:h-auto md:overflow-visible md:rounded-none md:shadow-none md:ring-0">
-        <TerrainMap field={field} neighborhoods={top} variant="hero" padding={heroPad} />
+        <TerrainMap field={field} neighborhoods={top} variant="hero" padding={heroPad} onReady={() => markReady("hero")} />
         <div className="pointer-events-none absolute inset-y-0 left-0 hidden w-[52%] bg-gradient-to-r from-paper from-30% via-paper/75 to-transparent md:block" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 hidden h-40 bg-gradient-to-t from-paper to-transparent md:block" />
       </div>

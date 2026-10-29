@@ -25,6 +25,8 @@ export type TerrainMapProps = {
   padding?: { top: number; bottom: number; left: number; right: number };
   /** loves by domain, used in the hover card to name what drives a cell */
   loveNames?: Partial<Record<string, string>>;
+  /** called once, when the field is on the map, the camera has settled and the tiles are in */
+  onReady?: () => void;
   className?: string;
 };
 
@@ -54,6 +56,7 @@ export function TerrainMap({
   variant = "work",
   padding = { top: 40, bottom: 40, left: 40, right: 40 },
   loveNames,
+  onReady,
   className,
 }: TerrainMapProps) {
   const el = useRef<HTMLDivElement>(null);
@@ -64,6 +67,7 @@ export function TerrainMap({
   const anim = useRef<number | null>(null);
   const markers = useRef<maplibregl.Marker[]>([]);
   const fittedFor = useRef<string | null>(null);
+  const everFitted = useRef(false);
   const [hover, setHover] = useState<{ x: number; y: number; cell: FieldCell; props: HexProps } | null>(null);
   
 
@@ -231,9 +235,36 @@ export function TerrainMap({
       [Math.min(...lons), Math.min(...lats)],
       [Math.max(...lons), Math.max(...lats)],
     ];
-    map.fitBounds(bounds, { padding, pitch: variant === "hero" ? 54 : 48, bearing: -14, duration: 1400, maxZoom: 13.6 });
+    // the first frame jumps straight to the field so its tiles load at once; later cities fly
+    map.fitBounds(bounds, { padding, pitch: variant === "hero" ? 54 : 48, bearing: -14, duration: everFitted.current ? 1400 : 0, maxZoom: 13.6 });
+    everFitted.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [field, ready]);
+
+  // --- readiness for a loading screen: the orbit never lets the map go idle, so check directly
+  const onReadyRef = useRef(onReady);
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  });
+  const told = useRef(false);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map || !hexes || told.current || !onReadyRef.current) return;
+    const iv = window.setInterval(() => {
+      if (fittedFor.current && !map.isMoving() && map.areTilesLoaded()) {
+        told.current = true;
+        window.clearInterval(iv);
+        onReadyRef.current?.();
+      }
+    }, 120);
+    return () => window.clearInterval(iv);
+  }, [ready, hexes]);
+  useEffect(() => {
+    if (failed && !told.current) {
+      told.current = true;
+      onReadyRef.current?.();
+    }
+  }, [failed]);
 
   // --- hero orbit
   useEffect(() => {

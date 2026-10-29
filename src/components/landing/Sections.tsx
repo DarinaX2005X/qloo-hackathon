@@ -2,42 +2,41 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { motion, useInView } from "motion/react";
+import { motion } from "motion/react";
 import type { ResolvedLove } from "@/shared/contracts";
 import { TerrainMap } from "@/components/map/TerrainMap";
 import { LogoMark } from "@/components/brand/Logo";
 import { Button } from "@/components/ui/primitives";
 import { emptyState, encodeState } from "@/lib/state";
 import { resolveNames, useLiveField } from "./useLiveField";
+import { useLanding } from "./LandingData";
+import { LANDING, type LandingScene } from "./scenes";
+import { AnyCity, Demo, H2, MakeItYours } from "./More";
 
-/** Renders children only once scrolled near, so the page doesn't start five maps at load. */
-function WhenNear({ children, className }: { children: React.ReactNode; className?: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const near = useInView(ref, { once: true, margin: "0px 0px -10% 0px" });
-  return (
-    <div ref={ref} className={className}>
-      {near ? children : null}
-    </div>
-  );
-}
-
-function useResolved(names: string[]) {
+/** Loves for a landing scene: ready from the server, resolved here only as a fallback. */
+function useResolved(names: string[], prepared: LandingScene | null | undefined, pick: "loves" | "companion" = "loves") {
+  const { settled } = useLanding();
   const [loves, setLoves] = useState<ResolvedLove[]>([]);
   useEffect(() => {
-    resolveNames(names).then((r) => setLoves(r.filter((l) => l.chosen)));
+    if (!settled) return;
+    const ready = prepared?.[pick];
+    if (ready?.length) setLoves(ready);
+    else resolveNames(names).then((r) => setLoves(r.filter((l) => l.chosen)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [settled, prepared]);
   return loves;
 }
 
-function TasteCard({ title, names, city, ink }: { title: string; names: string[]; city: string; ink: "you" | "them" }) {
-  const loves = useResolved(names);
-  const { field, hoods } = useLiveField(city, ink === "you" ? loves : loves, null);
+
+function TasteCard({ title, names, city, scene }: { title: string; names: string[]; city: string; scene: "reader" | "owl" }) {
+  const { data, markReady } = useLanding();
+  const loves = useResolved(names, data?.[scene]);
+  const { field, hoods } = useLiveField(city, loves, null, true, data?.[scene]);
   const href = `/explore?s=${encodeState({ ...emptyState(city), loves })}`;
   return (
     <div className="overflow-hidden rounded-[28px] bg-paper-raised shadow-[var(--shadow-raised)] ring-1 ring-line">
       <div className="relative h-[340px] sm:h-[400px]">
-        <TerrainMap field={field} neighborhoods={hoods?.slice(0, 3) ?? []} variant="hero" padding={{ top: 40, bottom: 30, left: 30, right: 30 }} />
+        <TerrainMap field={field} neighborhoods={hoods?.slice(0, 3) ?? []} variant="hero" padding={{ top: 40, bottom: 30, left: 30, right: 30 }} onReady={() => markReady(scene)} />
       </div>
       <div className="p-5 sm:p-6">
         <p className="text-[13px] font-[560] text-ink-3">{title}</p>
@@ -66,7 +65,7 @@ function SameCity() {
     <section className="mx-auto max-w-[1360px] px-5 py-24 md:px-10 md:py-32">
       <div className="grid gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16">
         <div className="lg:pt-6">
-          <h2 className="text-[40px] font-[690] leading-[1.02] tracking-[-0.035em] sm:text-[56px]">Same city, two different maps</h2>
+          <h2 className={H2}>Same city, two different maps</h2>
           <p className="mt-5 max-w-[440px] text-[18px] leading-[1.55] text-ink-2">
             Neighborhood guides are written for an average visitor. Homing starts from what you love, so a quiet reader and a night owl moving to Berlin get different peaks, different streets and different first days.
           </p>
@@ -74,10 +73,10 @@ function SameCity() {
             Both maps below are live. They come from Qloo&apos;s taste graph, which connects what people like across music, film, books, brands and places to where those audiences actually spend time.
           </p>
         </div>
-        <WhenNear className="grid gap-4 sm:grid-cols-2">
-          <TasteCard title="A quiet reader" city="Berlin" ink="you" names={["Haruki Murakami", "Radiohead", "Fleabag"]} />
-          <TasteCard title="A night owl" city="Berlin" ink="you" names={["Charli xcx", "Peggy Gou", "Euphoria"]} />
-        </WhenNear>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <TasteCard title="A quiet reader" city={LANDING.reader.city} scene="reader" names={LANDING.reader.loves} />
+          <TasteCard title="A night owl" city={LANDING.owl.city} scene="owl" names={LANDING.owl.loves} />
+        </div>
       </div>
     </section>
   );
@@ -86,7 +85,7 @@ function SameCity() {
 const STEPS = [
   {
     title: "You name what you love",
-    body: "Type a few names or drop a screenshot of a playlist, watchlist or bookshelf. Each one is matched to an entity in Qloo's taste graph, so “Fleabag” means the show, with its audience.",
+    body: "Type a few names, a genre like “jazz”, or drop a screenshot of a playlist, watchlist or bookshelf. Each one is matched to an entity in Qloo's taste graph, so “Fleabag” means the show, with its audience.",
     call: "Qloo search",
   },
   {
@@ -120,7 +119,7 @@ function How() {
   return (
     <section id="how" className="bg-ink text-paper">
       <div className="mx-auto max-w-[1360px] px-5 py-24 md:px-10 md:py-32">
-        <h2 className="max-w-[760px] text-[40px] font-[690] leading-[1.02] tracking-[-0.035em] sm:text-[56px]">How Homing reads a city</h2>
+        <h2 className={`max-w-[760px] ${H2}`}>How Homing reads a city</h2>
         <ol className="mt-14 grid gap-x-10 gap-y-12 sm:grid-cols-2 lg:grid-cols-3">
           {STEPS.map((s, i) => (
             <motion.li
@@ -144,21 +143,18 @@ function How() {
 }
 
 function TwoInks() {
-  return <TwoInksBody />;
-}
-
-function TwoInksBody() {
-  const you = useResolved(["Haruki Murakami", "Radiohead", "Wes Anderson"]);
-  const them = useResolved(["Peggy Gou", "Succession", "Patagonia"]);
-  const { field, hoods } = useLiveField("Lisbon", you, them);
+  const { data, markReady } = useLanding();
+  const you = useResolved(LANDING.pair.you, data?.pair);
+  const them = useResolved(LANDING.pair.them, data?.pair, "companion");
+  const { field, hoods } = useLiveField(LANDING.pair.city, you, them, true, data?.pair);
   return (
     <section className="mx-auto max-w-[1360px] px-5 py-24 md:px-10 md:py-32">
       <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-16">
-        <WhenNear className="order-2 h-[440px] overflow-hidden rounded-[28px] bg-paper-raised shadow-[var(--shadow-raised)] ring-1 ring-line sm:h-[540px] lg:order-1">
-          <TerrainMap field={field} mode="pair" neighborhoods={hoods?.slice(0, 3) ?? []} variant="hero" padding={{ top: 40, bottom: 40, left: 40, right: 40 }} />
-        </WhenNear>
+        <div className="order-2 h-[440px] overflow-hidden rounded-[28px] bg-paper-raised shadow-[var(--shadow-raised)] ring-1 ring-line sm:h-[540px] lg:order-1">
+          <TerrainMap field={field} mode="pair" neighborhoods={hoods?.slice(0, 3) ?? []} variant="hero" padding={{ top: 40, bottom: 40, left: 40, right: 40 }} onReady={() => markReady("pair")} />
+        </div>
         <div className="order-1 lg:order-2">
-          <h2 className="text-[40px] font-[690] leading-[1.02] tracking-[-0.035em] sm:text-[56px]">Moving with someone</h2>
+          <h2 className={H2}>Moving with someone</h2>
           <p className="mt-5 text-[18px] leading-[1.55] text-ink-2">
             Add what they love and the map prints in two inks. Red is you, teal is them, and the dark overprint is where you both belong. Neighborhoods are ranked so the less happy of you two is as happy as possible, not by an average that leaves one person out.
           </p>
@@ -212,11 +208,12 @@ function Closing() {
 export function Sections() {
   return (
     <>
+      <Demo />
       <SameCity />
+      <AnyCity />
       <How />
-      <WhenNear>
-        <TwoInks />
-      </WhenNear>
+      <MakeItYours />
+      <TwoInks />
       <Closing />
     </>
   );

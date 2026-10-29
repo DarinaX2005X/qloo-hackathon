@@ -5,6 +5,7 @@ import type { ExploreState, Neighborhood, ResolvedLove, TasteField } from "@/sha
 import { pickEntity } from "@/lib/pick";
 import { api } from "@/components/explore/api";
 import { emptyState } from "@/lib/state";
+import type { LandingScene } from "./scenes";
 
 /** Resolve a short list of names to Qloo entities, in order, skipping misses. */
 export async function resolveNames(names: string[]): Promise<ResolvedLove[]> {
@@ -21,17 +22,28 @@ export async function resolveNames(names: string[]): Promise<ResolvedLove[]> {
   return out;
 }
 
-/** Field and neighborhoods for a small landing scene. Keeps the last good result while a new one loads. */
-export function useLiveField(city: string, loves: ResolvedLove[], companion?: ResolvedLove[] | null, withHoods = true) {
+const sceneKey = (city: string, loves: ResolvedLove[], companion?: ResolvedLove[] | null) =>
+  JSON.stringify([city, loves.map((l) => l.chosen?.id), companion?.map((l) => l.chosen?.id)]);
+
+/** Field and neighborhoods for a small landing scene. Keeps the last good result while a new one loads.
+ *  A scene the server already prepared (/api/landing) is used as is, without asking again. */
+export function useLiveField(city: string, loves: ResolvedLove[], companion?: ResolvedLove[] | null, withHoods = true, prepared?: LandingScene | null) {
   const [field, setField] = useState<TasteField | null>(null);
   const [hoods, setHoods] = useState<Neighborhood[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const key = JSON.stringify([city, loves.map((l) => l.chosen?.id), companion?.map((l) => l.chosen?.id)]);
+  const key = sceneKey(city, loves, companion);
   const last = useRef("");
 
   useEffect(() => {
     if (!loves.some((l) => l.chosen) || key === last.current) return;
+    if (prepared && key === sceneKey(prepared.city, prepared.loves, prepared.companion)) {
+      last.current = key;
+      setField(prepared.field);
+      setHoods(prepared.hoods);
+      setError(null);
+      return;
+    }
     const ac = new AbortController();
     const state: ExploreState = { ...emptyState(city), loves, companion: companion?.length ? { loves: companion } : null };
     const t = setTimeout(async () => {
