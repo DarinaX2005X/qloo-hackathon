@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { planFromPlaces, solvePlan, minutes, excludedPlace, planDayNote } from '@/server/engine/plan';
+import { planFromPlaces, solvePlan, minutes, excludedPlace, planDayNote, MAX_RECOVERY_ATTEMPTS, MAX_RECOVERY_QLOO_CALLS, PLAN_QLOO_CALL_LIMIT } from '@/server/engine/plan';
+import { consumeQlooCall } from '@/server/qloo/budget';
 import { rankNeighborhoods } from '@/server/engine/neighborhoods';
 import { getCityEvidence } from '@/server/engine/evidence';
 import { placesNear, placeFromRow } from '@/server/engine/places';
@@ -17,6 +18,95 @@ const pool = () => ['coffee', 'culture', 'food', 'coffee', 'food', 'drinks'].map
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(rankNeighborhoods).mockResolvedValue([area('Empty'), area('Next')]); vi.mocked(getCityEvidence).mockResolvedValue({ yours: [], fingerprint: { you: [] } }); });
 
 describe('08 plan recovery and explicit reasons', () => {
+  it('preserves completed relaxed stops when swapping the first stop across two packed days', () => {
+    const places = [
+      ...Array.from({ length: 16 }, (_, i) => place(`coffee-${String(i).padStart(2, '0')}`)),
+      ...Array.from({ length: 6 }, (_, i) => place(`food-${i}`, { category: 'food' })),
+      ...Array.from({ length: 3 }, (_, i) => place(`drinks-${i}`, { category: 'drinks' })),
+    ];
+    const areas = [{ id: 'a', name: 'A', places }];
+    const options = { pace: 'packed' as const, relaxCategories: true };
+    const before = planFromPlaces(2, areas, now, options);
+    const removed = before.days[0].stops[0].place.id;
+    const after = planFromPlaces(2, areas, now, { ...options, exclude: [removed], include: [removed] });
+    expect(before.days.every(day => day.stops.length === 8)).toBe(true);
+    expect(before.days[0].stops.some(s => s.reasonCodes?.includes('relaxed_category'))).toBe(true);
+    expect(after.days.flatMap(day => day.stops).some(s => s.place.id === removed)).toBe(false);
+    for (const [d, day] of before.days.entries()) for (const [i, stop] of day.stops.entries()) {
+      if (stop.place.id !== removed) expect(after.days[d].stops[i].place.id).toBe(stop.place.id);
+    }
+    expect(after.days[1].missing.join(' ')).toContain('excluded from this plan');
+  });
+  it.each([false, true])('keeps ID exclusions absolute through includes, alternate areas, second-day and wide recovery (wide=%s)', async wide => {
+    vi.mocked(rankNeighborhoods).mockResolvedValue(['A', 'B', 'C'].map(area));
+    const forbidden = place('removed', { affinity: 1 });
+    vi.mocked(placesNear).mockImplementation(async (_s, n, _c, _f, options) => {
+      if (!options?.radius || (wide && options.radius !== 2200)) return [forbidden];
+      const id = typeof n === 'object' && n && 'id' in n ? n.id : 'pool';
+      return [forbidden, ...Array.from({ length: 3 }, (_, batch) => pool().map(p => ({ ...p, id: `${id}-${batch}-${p.id}` }))).flat()];
+    });
+    const result = await solvePlan(state({ days: 2, pace: 'packed' }), ['A', 'B'], { exclude: ['removed'], include: ['removed'] });
+    expect(result.days.some(day => day.stops.length > 0)).toBe(true);
+    expect(result.days.flatMap(day => day.stops).every(s => s.place.id !== 'removed')).toBe(true);
+    expect(vi.mocked(placesNear).mock.calls.some(call => call[4]?.radius === (wide ? 2200 : 900))).toBe(true);
+    const ids = result.days.flatMap(day => day.stops.map(s => s.place.id));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+  it('does not fetch a conflicting include that the person explicitly excluded', async () => {
+    vi.mocked(placesNear).mockResolvedValue(pool());
+    const result = await solvePlan(state({ days: 1 }), ['Empty'], { include: ['removed'], exclude: ['removed'] });
+    expect(qlooGet).not.toHaveBeenCalled();
+    expect(result.days[0].missing.join(' ')).toContain('removed: excluded from this plan');
+  });
+  it('shares at most three alternate-area attempts and one wider attempt across all three days', async () => {
+    const ranked = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map(area);
+    vi.mocked(rankNeighborhoods).mockResolvedValue(ranked);
+    vi.mocked(placesNear).mockResolvedValue([]);
+    const result = await solvePlan(state({ days: 3 }), ['A', 'B', 'C']);
+    const recovery = vi.mocked(placesNear).mock.calls.filter(call => call[4]?.radius);
+    expect(recovery).toHaveLength(MAX_RECOVERY_ATTEMPTS);
+    expect(recovery.filter(call => call[4]?.radius === 900)).toHaveLength(3);
+    expect(recovery.filter(call => call[4]?.radius === 2200)).toHaveLength(1);
+    expect(placesNear).toHaveBeenCalledTimes(3 + MAX_RECOVERY_ATTEMPTS);
+    expect(result.days.every(day => day.note?.includes('within this search'))).toBe(true);
+  });
+  it('skips both place fan-out and recovery when all planned categories are excluded', async () => {
+    const result = await solvePlan(state({ days: 3 }), ['Empty'], { excludeCategories: ['coffee', 'culture', 'food', 'drinks'], include: ['also-excluded'] });
+    expect(placesNear).not.toHaveBeenCalled(); expect(qlooGet).not.toHaveBeenCalled();
+    expect(result.days.every(day => !day.stops.length && day.note?.includes('Your exclusions'))).toBe(true);
+  });
+  it('does not recover intentionally excluded slots when the other slots are filled', async () => {
+    vi.mocked(placesNear).mockResolvedValue(pool().filter(p => p.category !== 'culture'));
+    const result = await solvePlan(state({ days: 1 }), ['Empty'], { excludeCategories: ['culture'] });
+    expect(result.days[0].missing).toEqual(['Morning culture']);
+    expect(placesNear).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(placesNear).mock.calls[0][2]).not.toContain('culture');
+  });
+  it('caps recovery transport attempts even when an individual pool needs retries', async () => {
+    vi.mocked(rankNeighborhoods).mockResolvedValue(['A', 'B', 'C', 'D', 'E'].map(area));
+    let calls = 0;
+    vi.mocked(placesNear).mockImplementation(async (_s, _n, _c, _f, options) => {
+      if (options?.radius) for (let i = 0; i < 15; i++) { consumeQlooCall(); calls++; }
+      return [];
+    });
+    const result = await solvePlan(state({ days: 3 }), ['A']);
+    expect(calls).toBe(MAX_RECOVERY_QLOO_CALLS);
+    expect(result.days.every(day => day.note?.includes('within this search'))).toBe(true);
+    expect(vi.mocked(placesNear).mock.calls.filter(call => call[4]?.radius).length).toBeLessThanOrEqual(MAX_RECOVERY_ATTEMPTS);
+  });
+  it('caps the whole plan, including work done before recovery', async () => {
+    let calls = 0;
+    vi.mocked(rankNeighborhoods).mockImplementation(async () => {
+      for (let i = 0; i < PLAN_QLOO_CALL_LIMIT - 5; i++) { consumeQlooCall(); calls++; }
+      return [area('A')];
+    });
+    vi.mocked(placesNear).mockImplementation(async () => {
+      for (let i = 0; i < 10; i++) { consumeQlooCall(); calls++; }
+      return [];
+    });
+    await expect(solvePlan(state({ days: 1 }), ['A'])).rejects.toMatchObject({ error: { code: 'quota' } });
+    expect(calls).toBe(PLAN_QLOO_CALL_LIMIT);
+  });
   it('excludes museum/gallery tags, unnamed primary genres and place types while preserving other culture', () => {
     const forbidden = [
       place('typed', { category: 'culture', classifications: ['urn:entity:place:museum'] }),
@@ -67,6 +157,7 @@ describe('08 plan recovery and explicit reasons', () => {
     expect(result.days[0].neighborhood).toBe('Next');
     expect(result.days[0].note).toBe("Homing couldn't fill this day with places that fit you near Empty, so it used Next instead.");
     expect(result.days[0].stops.every(s => s.reasonCodes?.includes('relaxed_neighborhood'))).toBe(true);
+    expect(placesNear).toHaveBeenCalledTimes(2); // Initial pool + first successful alternate; no wider search.
   });
   it('widens radius and then relaxes soft preferences while retaining museum exclusions', async () => {
     vi.mocked(rankNeighborhoods).mockResolvedValue([area('Only')]);
@@ -81,7 +172,7 @@ describe('08 plan recovery and explicit reasons', () => {
   it('reports exhausted recovery without inventing stops', async () => {
     vi.mocked(placesNear).mockResolvedValue([]);
     const result = await solvePlan(state({ days: 2 }), ['Empty']);
-    expect(result.days.every(d => !d.stops.length && d.note?.includes("Homing couldn't find places that fit you"))).toBe(true);
+    expect(result.days.every(d => !d.stops.length && /Homing couldn't (?:find|finish)/.test(d.note ?? ''))).toBe(true);
     expect(result.days.every(d => !/closed|eligible open|none_nearby/.test(d.note ?? ''))).toBe(true);
   });
   it('walking pushes the next arrival and rechecks hours at that later time', () => {

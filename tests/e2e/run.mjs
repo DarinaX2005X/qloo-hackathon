@@ -584,7 +584,7 @@ try {
       await response.finished();
       await poll(() => stateOf(page).pc === 'packed', 'Packed pace in URL');
       const afterCount = await countAtLeast(page, 'plan-stop', beforeCount);
-      firstStop = await page.getByTestId('plan-stop').first().locator('p').first().innerText();
+      firstStop = await page.getByTestId('plan-stop').first().getByTestId('plan-stop-name').innerText();
       await page.getByTestId('plan-stop').first().scrollIntoViewIfNeeded();
       await shot(page, 'packed-plan');
       return { beforeCount, afterCount, firstStop };
@@ -595,7 +595,7 @@ try {
       await stop.hover();
       await stop.getByRole('button', { name: /^Swap / }).click();
       const changed = await poll(async () => {
-        const names = await page.getByTestId('plan-stop').locator('p.truncate').allInnerTexts();
+        const names = await page.getByTestId('plan-stop').getByTestId('plan-stop-name').allInnerTexts();
         return names.length && names[0] !== firstStop && !names.includes(firstStop) && names;
       }, `Swapped plan no longer contains ${firstStop}`, LOAD_TIMEOUT);
       await page.getByTestId('plan-stop').first().scrollIntoViewIfNeeded();

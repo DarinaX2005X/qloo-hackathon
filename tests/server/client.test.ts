@@ -2,11 +2,52 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearQlooCache, qlooGet } from "@/server/qloo/client";
 import { loadPersonMaps } from "@/server/engine/field";
 import { love } from "./helpers";
+import { withQlooBudget, remainingQlooCalls } from "@/server/qloo/budget";
 
 beforeEach(() => { clearQlooCache(); vi.stubEnv("QLOO_API_KEY", "synthetic-test-key"); vi.stubEnv("QLOO_API_URL", "https://qloo.example.test"); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 describe("Qloo client", () => {
+  it('enforces an atomic outbound cap across concurrent calls, without charging cache hits', async () => {
+    const fetcher = vi.fn().mockImplementation(async () => Response.json({ results: [] }));
+    vi.stubGlobal('fetch', fetcher);
+    let used = -1;
+    const results = await withQlooBudget(3, () => Promise.allSettled(Array.from({ length: 12 }, (_, i) => qlooGet('/search', { query: `budget-${i}` }))), count => { used = count; });
+    expect(fetcher).toHaveBeenCalledTimes(3); expect(used).toBe(3);
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(3);
+    await withQlooBudget(0, () => qlooGet('/search', { query: 'budget-0' }));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+  it('counts retries against the same transport cap', async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn().mockImplementation(async () => new Response('', { status: 503 }));
+    vi.stubGlobal('fetch', fetcher);
+    const assertion = expect(withQlooBudget(1, () => qlooGet('/search', { query: 'retry-budget' }))).rejects.toMatchObject({ error: { code: 'quota' } });
+    await vi.advanceTimersByTimeAsync(600); await assertion;
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('keeps concurrent request budgets isolated and charges nested budgets to their parent', async () => {
+    const fetcher = vi.fn().mockImplementation(async () => Response.json({ results: [] }));
+    vi.stubGlobal('fetch', fetcher);
+    await Promise.all(['one', 'two'].map(query => withQlooBudget(1, () => qlooGet('/search', { query }))));
+    await withQlooBudget(2, async () => {
+      await withQlooBudget(2, () => qlooGet('/search', { query: 'nested-1' }));
+      expect(remainingQlooCalls()).toBe(1);
+      await withQlooBudget(2, () => qlooGet('/search', { query: 'nested-2' }));
+      await expect(withQlooBudget(2, () => qlooGet('/search', { query: 'nested-3' }))).rejects.toMatchObject({ error: { code: 'quota' } });
+    });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+  it('cannot launch uncharged background work after the budget has been refunded', async () => {
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let background!: Promise<unknown>;
+    await withQlooBudget(2, async () => { background = gate.then(() => qlooGet('/search', { query: 'late' })); });
+    const assertion = expect(background).rejects.toMatchObject({ error: { code: 'quota' } });
+    release(); await assertion;
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it("sends GET with bounded take, caches projected data and coalesces concurrent queries", async () => {
     const fetcher = vi.fn().mockResolvedValue(Response.json({ results: [{ entity_id: "x", name: "X", akas: ["private"], external: {}, properties: { short_description: "Short", overall_description: "Long" } }] }));
     vi.stubGlobal("fetch", fetcher);

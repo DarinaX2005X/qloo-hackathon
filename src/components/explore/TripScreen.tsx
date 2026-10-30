@@ -176,7 +176,7 @@ function Timeline() {
                       <div className="flex items-baseline gap-2.5">
                         <span className="tnum w-11 shrink-0 text-[14px] font-[620] text-ink">{s.time}</span>
                         <button onClick={() => ex.setOpenPlace(s.place)} className="min-w-0 flex-1 text-left">
-                          <p className="line-clamp-2 text-[15px] font-[580] leading-snug text-ink hover:underline">{s.place.name}</p>
+                          <p data-testid="plan-stop-name" className="line-clamp-2 text-[15px] font-[580] leading-snug text-ink hover:underline">{s.place.name}</p>
                           <p className="text-[12.5px] text-ink-3">
                             {s.slot}
                             {s.hoursNote === "hours not listed" ? ", hours not listed" : ""}

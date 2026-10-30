@@ -4,6 +4,8 @@ import { appendFileSync } from 'node:fs';
 import { profile, profiles } from './profiles-08';
 import { runAgent } from '../../src/server/agent/runner';
 import { isMuseumPlace } from '../../src/server/engine/plan';
+import { withQlooBudget } from '../../src/server/qloo/budget';
+import { QLOO_REQUEST_LIMITS } from '../../src/server/engine/rate-limit';
 import type { AgentEvent } from '../../src/shared/contracts';
 
 loadEnvFile('.env.local');
@@ -18,9 +20,11 @@ for (const city of ['Lisbon', 'Berlin']) {
   const state = await profile(city, profiles[5].tastes);
   const events: AgentEvent[] = [];
   const started = performance.now();
-  await runAgent({ state, message, history: [] }, e => events.push(e));
+  let qlooCalls = 0;
+  await withQlooBudget(QLOO_REQUEST_LIMITS['/api/agent'], () => runAgent({ state, message, history: [] }, e => events.push(e)), used => { qlooCalls = used; });
   const itinerary = events.flatMap(e => e.type === 'card' && e.card.kind === 'plan' ? [e.card.itinerary] : []).at(-1);
-  log(`\n${city}: ${((performance.now() - started) / 1000).toFixed(2)}s; tools: ${events.flatMap(e => e.type === 'trace' ? [e.tool] : []).join(' → ')}`);
+  log(`\n${city}: ${((performance.now() - started) / 1000).toFixed(2)}s; ${qlooCalls} outbound Qloo attempts; tools: ${events.flatMap(e => e.type === 'trace' ? [e.tool] : []).join(' → ')}`);
+  assert(qlooCalls > 0, 'Cold-city live check must exercise the shared transport counter');
   if (!itinerary) log(`No plan returned. ${JSON.stringify(events.filter(e => e.type === 'error' || e.type === 'delta'))}`);
   assert(itinerary, `${city}: agent must return a plan card`);
   assert.equal(itinerary.days.length, 2, `${city}: requested two days`);

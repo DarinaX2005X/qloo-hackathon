@@ -8,9 +8,10 @@ import { POST as neighborhoods } from "@/app/api/neighborhoods/route";
 import { POST as places } from "@/app/api/places/route";
 import { POST as plan } from "@/app/api/plan/route";
 import { POST as fingerprint } from "@/app/api/fingerprint/route";
+import { POST as spot } from "@/app/api/spot/route";
 import { POST as cities } from "@/app/api/cities/route";
 import { compareCities } from "@/server/engine/cities";
-import { clearRateLimits } from "@/server/engine/rate-limit";
+import { clearRateLimits, enforceRateLimit, QLOO_REQUEST_LIMITS, RATE_CAPACITY } from "@/server/engine/rate-limit";
 import { errorResponse } from "@/server/engine/http";
 import { state } from "./helpers";
 
@@ -19,6 +20,15 @@ vi.mock("@/server/engine/cities", () => ({ compareCities: vi.fn() }));
 beforeEach(() => { vi.mocked(qlooGet).mockReset(); vi.mocked(compareCities).mockReset(); clearRateLimits(); });
 
 describe("API error contract", () => {
+  it.each([['plan', plan], ['places', places], ['spot', spot], ['neighborhoods', neighborhoods], ['field', field]] as const)('limits /api/%s before starting Qloo work', async (path, handler) => {
+    const request = () => new Request(`https://example.test/api/${path}`, { method: 'POST', headers: { 'x-forwarded-for': '192.0.2.80' }, body: JSON.stringify({ ...state(), neighborhoodIds: ['a'] }) });
+    for (let i = 0; i < Math.floor(RATE_CAPACITY / QLOO_REQUEST_LIMITS[`/api/${path}`]); i++) enforceRateLimit(request());
+    const response = await handler(request());
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ error: { code: 'quota' } });
+    expect(Number(response.headers.get('Retry-After'))).toBeGreaterThan(0);
+    expect(qlooGet).not.toHaveBeenCalled();
+  });
   it.each([1, 5])("accepts %s cities, including a single progressive request", async count => {
     const requested = ["Lisbon", "Berlin", "Tokyo", "Paris", "Rome"].slice(0, count);
     vi.mocked(compareCities).mockResolvedValue([]);

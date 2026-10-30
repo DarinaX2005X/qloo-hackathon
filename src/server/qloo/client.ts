@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { ApiError, apiError } from "@/shared/contracts";
+import { consumeQlooCall } from "./budget";
 
 export type QlooParams = Record<string, string | number | undefined>;
 export type QlooRecord = Record<string, unknown>;
@@ -79,6 +80,7 @@ export function releaseQlooSlot(): void {
 }
 
 export async function fetchQlooAttempt(url: URL, apiKey: string): Promise<{ status: number; value?: unknown }> {
+  consumeQlooCall();
   await acquireQlooSlot();
   try {
     const response = await fetch(url, {
