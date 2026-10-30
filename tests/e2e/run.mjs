@@ -434,14 +434,16 @@ try {
       return { chip: await chip.innerText(), existingResultsRetained: true, chipDialogWorks: true };
     });
     await step('Lisbonn resolves or shows a useful visible error without blank screen', page, async () => {
+      const isTypoCity = (c) => typeof c === 'string' && c !== 'Lisbon' && /^lisbonn?(,|$)/i.test(c.trim());
       await openTaste(page);
-      const fieldPromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/field' && r.request().postDataJSON()?.city === 'Lisbonn', { timeout: LOAD_TIMEOUT });
+      const fieldPromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/field' && isTypoCity(r.request().postDataJSON()?.city), { timeout: LOAD_TIMEOUT });
       void fieldPromise.catch(() => {});
-      const responsePromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/neighborhoods' && r.request().postDataJSON()?.city === 'Lisbonn', { timeout: LOAD_TIMEOUT });
+      const responsePromise = page.waitForResponse(r => new URL(r.url()).pathname === '/api/neighborhoods' && isTypoCity(r.request().postDataJSON()?.city), { timeout: LOAD_TIMEOUT });
       void responsePromise.catch(() => {});
       await page.getByTestId('city-combobox').fill('Lisbonn');
       await page.getByTestId('city-combobox').press('Enter');
-      await poll(() => stateOf(page).c === 'Lisbonn', 'URL city committed to Lisbonn');
+      // the picker either keeps the typo or resolves it to its best match ("Lisbon, Portugal"); both must answer
+      await poll(() => isTypoCity(stateOf(page).c), 'URL city committed to Lisbonn or its best match');
       // Wait for a response for the misspelled city so old Lisbon rows cannot pass.
       const fieldResponse = await fieldPromise;
       const response = fieldResponse.ok() ? await responsePromise : fieldResponse;
