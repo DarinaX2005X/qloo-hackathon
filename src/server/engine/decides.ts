@@ -6,15 +6,25 @@ export function decidesResult(ranking: Neighborhood[], variants: { love: Resolve
   const neighborhoods = ranking.slice(0, 3).map(({ id, name, rank }) => ({ id, name, rank,
     without: variants.map(({ love, ranking }) => ({ query: love.query, name: love.chosen?.name ?? love.query, rank: ranking.slice(0, 8).find((n) => n.id === id)?.rank ?? null })) }));
   const top = neighborhoods[0];
-  const drops = [...(top?.without ?? [])].sort((a, b) => (b.rank ?? 9) - (a.rank ?? 9));
-  const pivotal = drops.find((item) => item.rank !== 1)?.query ?? null;
-  const name = drops.find((item) => item.query === pivotal)?.name;
+  // the largest drop decides; "without" keeps profile order, so on a tie the first such love is pivotal
+  const fall = (rank: number | null) => rank ?? 9;
+  const without = top?.without ?? [];
+  const worst = Math.max(1, ...without.map((item) => fall(item.rank)));
+  const deciders = worst > 1 ? without.filter((item) => fall(item.rank) === worst) : [];
+  const pivotal = deciders[0]?.query ?? null;
   const robust = !pivotal;
+  const outOfTop = deciders[0]?.rank === null;
   const summary = !top ? "There are no ranked neighborhoods to compare yet." : !variants.length
     ? `${top.name} is first; there is nothing to compare yet with fewer than two active loves.`
-    : pivotal ? `${top.name} loses first place without ${name}${drops[0].rank === null ? " and drops out of the top eight" : ` (to #${drops[0].rank})`}.`
+    : deciders.length > 1
+      ? `${top.name} ${outOfTop ? "drops out of the top eight" : `falls to #${deciders[0].rank}`} ${orList(deciders.map((item) => `without ${item.name}`))}; no single love holds it up alone.`
+    : pivotal ? `${top.name} loses first place without ${deciders[0].name}${outOfTop ? " and drops out of the top eight" : ` (to #${deciders[0].rank})`}.`
     : `${top.name} stays first without any single love.`;
   return { neighborhoods, pivotal, robust, summary };
+}
+
+function orList(items: string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }
 
 export async function whatDecides(input: ExploreState): Promise<DecidesResult> {

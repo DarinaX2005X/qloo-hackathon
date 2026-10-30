@@ -18,7 +18,7 @@ export function Demo() {
   return (
     <section id="demo" className="mx-auto max-w-[1360px] px-5 pt-16 md:px-10 md:pt-24">
       <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <h2 className={H2}>Homing in 56 seconds</h2>
+        <h2 className={H2}>Homing in 62 seconds</h2>
         <p className="max-w-[440px] text-[17px] leading-[1.55] text-ink-2">
           One taste, from the first chip to a plan, then any city in the world. Every map and number in the film is real Qloo data.
         </p>
@@ -40,7 +40,7 @@ export function Demo() {
               setStarted(true);
               void ref.current?.play();
             }}
-            aria-label="Play the Homing tour, 56 seconds"
+            aria-label="Play the Homing tour, 62 seconds"
             className="group absolute inset-0 grid place-items-center bg-[oklch(23%_0.02_40/0.16)] transition-colors hover:bg-[oklch(23%_0.02_40/0.04)]"
           >
             <span className="flex items-center gap-4 rounded-full bg-paper-raised p-2 shadow-[var(--shadow-overlay)] transition-transform duration-300 ease-out group-hover:scale-[1.04] sm:py-3 sm:pl-3 sm:pr-7">
@@ -49,7 +49,7 @@ export function Demo() {
               </span>
               <span className="hidden text-left sm:block">
                 <span className="block text-[18px] font-[650] tracking-[-0.015em] text-ink">Play the tour</span>
-                <span className="tnum block text-[14px] text-ink-3">0:56, with sound</span>
+                <span className="tnum block text-[14px] text-ink-3">1:02, with sound</span>
               </span>
             </span>
           </button>

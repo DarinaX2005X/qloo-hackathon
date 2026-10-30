@@ -13,6 +13,11 @@ const POPULAR: Option[] = CITY_SUGGESTIONS.map((c) => ({ query: c, name: c, labe
 /** Short display name: "Portland, Oregon" reads as "Portland" in headings. */
 export const cityName = (q: string) => q.split(",")[0].trim();
 
+const sameName = (o: Option, q: string) => o.kind !== "typed" && o.name.toLowerCase() === q.toLowerCase();
+
+/** The city a lookup for q points at: an exact name match first, then the top result, else the typed text. */
+const bestMatch = (q: string, results: Option[]) => (results.find((o) => sameName(o, q)) ?? results[0])?.query ?? q;
+
 /** City combobox for any city in the world: popular picks, live search, or exactly what was typed. */
 export function CityPicker({
   value,
@@ -38,6 +43,10 @@ export function CityPicker({
 
   const q = text.trim();
   const typing = open && q.length >= 2 && q.toLowerCase() !== value.toLowerCase();
+  // Enter pressed while the lookup for the typed text is still running: resolve it when the results land
+  const enterPendingRef = useRef(false);
+  // the highlighted option was chosen with the arrow keys or the mouse, so Enter takes it as is
+  const navigatedRef = useRef(false);
   useEffect(() => {
     if (!typing) return;
     const ac = new AbortController();
@@ -46,10 +55,19 @@ export function CityPicker({
       try {
         const r = await fetch(`/api/localities?q=${encodeURIComponent(q)}`, { signal: ac.signal });
         const body = (await r.json()) as { results?: { query: string; name: string; label: string }[] };
-        setFound((body.results ?? []).map((x) => ({ ...x, kind: "found" as const })));
+        const results = (body.results ?? []).map((x) => ({ ...x, kind: "found" as const }));
+        setFound(results);
         setFoundQ(q);
+        if (enterPendingRef.current) {
+          enterPendingRef.current = false;
+          commitRef.current(bestMatch(q, results));
+        }
       } catch {
         /* keep typed text as the option */
+        if (enterPendingRef.current && !ac.signal.aborted) {
+          enterPendingRef.current = false;
+          commitRef.current(q);
+        }
       } finally {
         if (!ac.signal.aborted) setSearching(false);
       }
@@ -66,6 +84,7 @@ export function CityPicker({
 
   const commit = (c: string) => {
     const v = c.trim();
+    enterPendingRef.current = false;
     setOpen(false);
     if (v && v.toLowerCase() !== value.toLowerCase()) onChange(v);
     setText(v || value);
@@ -77,6 +96,19 @@ export function CityPicker({
   pendingRef.current = typing ? (foundQ === q && found[0] ? found[0].query : q) : null;
   const commitRef = useRef(commit);
   commitRef.current = commit;
+
+  // Enter takes a highlighted option only when the person moved to it, or when the list was produced
+  // for the typed text; otherwise it keeps the typed city (the popular list never overrides it)
+  const onEnter = () => {
+    const picked = navigatedRef.current ? options[hi] : undefined;
+    if (picked) return commit(picked.query);
+    if (!q || q.toLowerCase() === value.toLowerCase()) return commit(value);
+    const exact = [...options, ...POPULAR].find((o) => sameName(o, q));
+    if (exact) return commit(exact.query);
+    if (!typing) return commit(q);
+    if (foundQ === q) return commit(bestMatch(q, found));
+    enterPendingRef.current = true;
+  };
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
@@ -127,18 +159,29 @@ export function CityPicker({
           value={text}
           onFocus={(e) => {
             setOpen(true);
+            navigatedRef.current = enterPendingRef.current = false;
             e.target.select();
           }}
           onChange={(e) => {
             setText(e.target.value);
             setOpen(true);
             setHi(0);
+            navigatedRef.current = enterPendingRef.current = false;
           }}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") (e.preventDefault(), setHi((h) => Math.min(h + 1, options.length - 1)));
-            else if (e.key === "ArrowUp") (e.preventDefault(), setHi((h) => Math.max(h - 1, 0)));
-            else if (e.key === "Enter") (e.preventDefault(), commit(options[hi]?.query ?? text), (e.target as HTMLInputElement).blur());
-            else if (e.key === "Escape") (setOpen(false), setText(value));
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              navigatedRef.current = true;
+              setHi((h) => (e.key === "ArrowDown" ? Math.min(h + 1, options.length - 1) : Math.max(h - 1, 0)));
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              onEnter();
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              enterPendingRef.current = false;
+              setOpen(false);
+              setText(value);
+            }
           }}
           className={`w-full min-w-0 bg-transparent font-[560] text-ink outline-none placeholder:text-ink-3 ${hero ? "text-[17px]" : "text-[15px]"}`}
           placeholder="Any city in the world"
@@ -167,7 +210,10 @@ export function CityPicker({
                 key={c.query + i}
                 role="option"
                 aria-selected={i === hi}
-                onMouseEnter={() => setHi(i)}
+                onMouseEnter={() => {
+                  navigatedRef.current = true;
+                  setHi(i);
+                }}
                 onMouseDown={(e) => {
                   e.preventDefault();
                   commit(c.query);

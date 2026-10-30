@@ -12,6 +12,11 @@ const playwrightVersion = require(`${playwrightPath}/package.json`).version;
 const BASE_URL = process.env.BASE_URL || 'https://homing-taste.vercel.app';
 const TIMEOUT = 20_000;
 const LOAD_TIMEOUT = 45_000;
+// Assistant answers chain several Qloo calls; a cold home lookup alone can take ~45 s.
+const AGENT_TIMEOUT = 120_000;
+const SCENARIO_COUNT = 21;
+// Optional debugging filter, e.g. ONLY=3,17,10. Scenario 3 provides the resolved taste most others reuse.
+const ONLY = process.env.ONLY ? process.env.ONLY.split(',').map(s => s.trim()).filter(Boolean) : null;
 const reportDir = resolve(dirname(fileURLToPath(import.meta.url)), 'report');
 await mkdir(reportDir, { recursive: true });
 const started = new Date();
@@ -108,6 +113,7 @@ async function step(name, p, fn) {
   return entry.status === 'PASS';
 }
 async function scenario(id, name, fn) {
+  if (ONLY && !ONLY.includes(id)) return;
   active = { id, name, status: 'PASS', steps: [], screenshots: [] };
   const begin = performance.now();
   console.log(`\n${id}. ${name}`);
@@ -154,6 +160,38 @@ function expected4xx(e) {
     (['/api/field', '/api/neighborhoods', '/api/fingerprint'].includes(new URL(r.url).pathname) && (() => { try { return JSON.parse(r.requestBody).city === (r.scenario === '11' ? 'Qwzxplorvillle' : 'Lisbonn'); } catch { return false; } })())
   ));
 }
+// Screens of the explore shell: rail test id suffix, pathname, and the panel that proves the screen rendered.
+const SCREENS = [
+  ['map', '/explore', p => p.getByRole('heading', { name: 'Your neighborhoods', exact: true })],
+  ['assistant', '/explore/assistant', p => p.getByRole('region', { name: 'Assistant', exact: true })],
+  ['home', '/explore/home', p => p.getByTestId('home-screen')],
+  ['address', '/explore/address', p => p.getByTestId('address-screen')],
+  ['why', '/explore/why', p => p.getByTestId('why-screen')],
+  ['trip', '/explore/trip', p => p.getByRole('complementary', { name: 'Plan', exact: true })],
+  ['compare', '/explore/compare', p => p.getByRole('complementary', { name: 'Compare', exact: true })],
+];
+const pathOf = p => new URL(p.url()).pathname;
+const isPath = path => u => u.pathname === path;
+const apiPath = (r, path) => new URL(r.url()).pathname === path;
+const postJson = r => { try { return r.request().postDataJSON(); } catch { return null; } };
+// The single MapLibre canvas, tagged with a JS property (survives only if the element itself survives).
+const tagMap = (p, tag) => p.evaluate(t => {
+  const canvases = document.querySelectorAll('canvas.maplibregl-canvas');
+  if (canvases.length !== 1) throw new Error(`expected one map canvas, found ${canvases.length}`);
+  canvases[0].__e2eTag = t;
+  return true;
+}, tag);
+const mapTag = p => p.evaluate(() => {
+  const canvases = document.querySelectorAll('canvas.maplibregl-canvas');
+  return { canvases: canvases.length, tag: canvases[0]?.__e2eTag ?? null, connected: !!canvases[0]?.isConnected };
+});
+function sameTaste(p, path) {
+  const state = stateOf(p);
+  assert.equal(state.c, chipState.c, `${path}: ?s= city changed`);
+  assert.deepEqual(state.l.map(l => l.id), chipState.l.map(l => l.id), `${path}: ?s= tastes changed`);
+  return state;
+}
+const coordLabel = /^\s*-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+\s*$/;
 const md = value => String(value ?? '').replaceAll('|', '\\|').replace(/\r?\n/g, '<br>');
 async function saveReport(fatal) {
   const data = { started: started.toISOString(), finished: new Date().toISOString(), baseUrl: BASE_URL, playwrightVersion, browser: browser ? browser.version() : null, desktop: { width: 1440, height: 1000 }, mobile: { width: 390, height: 844 }, results, consoleErrors: consoleErrors.map(e => ({ ...e, expected: expected4xx(e) })), httpErrors, ...((fatal || fatalError) ? { fatal: fatal || fatalError } : {}) };
@@ -646,6 +684,289 @@ try {
       return { path: new URL(page.url()).pathname, neighborhoods: count, sameRanking: true };
     });
   });
+  await scenario('17', 'Screens rail keeps ?s= and one map; Back between screens; mobile tab bar and More', async () => {
+    const tag = `e2e-${Date.now()}`;
+    const visited = [];
+    const railed = await step('Rail visits all seven screens with ?s= kept and the same map canvas', page, async () => {
+      await openTaste(page);
+      await mapReady(page);
+      await tagMap(page, tag);
+      // Start on Map, visit the other six, then return to Map, all through the rail.
+      for (const [key, path, panel] of [...SCREENS.slice(1), SCREENS[0]]) {
+        const link = page.getByTestId(`nav-${key}`);
+        const begin = performance.now();
+        await link.click();
+        await page.waitForURL(isPath(path));
+        await panel(page).waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+        sameTaste(page, path);
+        await poll(async () => await link.getAttribute('aria-current') === 'page', `nav-${key} marked as current`);
+        const m = await mapTag(page);
+        assert.deepEqual(m, { canvases: 1, tag, connected: true }, `${path}: map canvas was replaced or duplicated (${JSON.stringify(m)})`);
+        visited.push({ path, ms: Math.round(performance.now() - begin) });
+        await shot(page, `screen-${key}`);
+      }
+      await mapReady(page);
+      return { visited, mapCanvasTag: tag, canvases: 1 };
+    });
+    await step('Browser Back returns to Compare, then Trip, keeping ?s= and the map', page, async () => {
+      assert.ok(railed, 'Dependency failed: rail navigation did not complete');
+      const back = [];
+      for (const [key, path, panel] of [SCREENS[6], SCREENS[5]]) {
+        await page.goBack();
+        await page.waitForURL(isPath(path));
+        await panel(page).waitFor({ state: 'visible' });
+        sameTaste(page, path);
+        await poll(async () => await page.getByTestId(`nav-${key}`).getAttribute('aria-current') === 'page', `nav-${key} marked as current after Back`);
+        const m = await mapTag(page);
+        assert.deepEqual(m, { canvases: 1, tag, connected: true }, `Back to ${path}: map canvas was replaced (${JSON.stringify(m)})`);
+        back.push(path);
+      }
+      await shot(page, 'back-to-trip');
+      return { back, mapCanvasTag: tag };
+    });
+    const mobile = await newPage('17', { width: 390, height: 844 });
+    try {
+      await step('Mobile 390×844: bottom tab bar visible; More opens Why, Trip and Compare', mobile, async () => {
+        await mobile.goto(urlFor(chipState), { waitUntil: 'domcontentloaded' });
+        // Before the media query settles the desktop rail (also "Screens") can render for a frame; anchor on a tab.
+        await mobile.getByTestId('tab-map').waitFor({ state: 'visible' });
+        const bar = mobile.getByRole('navigation', { name: 'Screens', exact: true }).filter({ has: mobile.getByTestId('tab-map') });
+        await bar.waitFor({ state: 'visible' });
+        const box = await bar.boundingBox();
+        assert.ok(box && Math.abs(box.y + box.height - 844) <= 2 && box.width >= 388, `Tab bar is not docked at the bottom: ${JSON.stringify(box)}`);
+        for (const key of ['map', 'assistant', 'home', 'address']) await mobile.getByTestId(`tab-${key}`).waitFor({ state: 'visible' });
+        assert.equal(await mobile.getByTestId('nav-map').count(), 0, 'Desktop rail rendered on a phone');
+        const more = mobile.getByRole('button', { name: 'More screens', exact: true });
+        const opened = [];
+        for (const [title, path, label] of [['What decides', '/explore/why', 'Why'], ['Trip', '/explore/trip', 'Trip'], ['Compare', '/explore/compare', 'Compare']]) {
+          await more.click();
+          const sheet = mobile.getByRole('dialog', { name: 'More screens', exact: true });
+          await sheet.waitFor({ state: 'visible' });
+          if (!opened.length) await shot(mobile, 'more-sheet');
+          await sheet.getByRole('link', { name: new RegExp(`^${title}`) }).click();
+          await mobile.waitForURL(isPath(path));
+          await sheet.waitFor({ state: 'hidden' });
+          sameTaste(mobile, path);
+          await poll(async () => (await more.innerText()).trim() === label, `More tab shows the active hidden screen "${label}"`);
+          opened.push(path);
+        }
+        const widths = await mobile.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }));
+        assert.ok(widths.document <= widths.viewport, `Horizontal overflow on mobile Compare: ${JSON.stringify(widths)}`);
+        await shot(mobile, 'mobile-compare');
+        return { tabBar: box, tabs: ['Map', 'Assistant', 'Home', 'Address', 'More'], opened, widths };
+      });
+    } finally { await Promise.all(pendingEvidence); await mobile.close(); }
+  });
+  await scenario('18', 'Feels like home: Kreuzberg, Berlin printed over Lisbon', async () => {
+    await step('Berlin + Kreuzberg gives a match with similarity and a twin pair or shared tags', page, async () => {
+      assert.ok(chipState?.l?.length >= 2, 'Resolved taste state unavailable');
+      await page.goto(urlFor(chipState, '/explore/home'), { waitUntil: 'domcontentloaded' });
+      const panel = page.getByTestId('home-screen');
+      await panel.waitFor({ state: 'visible' });
+      const city = panel.getByTestId('city-combobox');
+      await city.click();
+      await city.fill('Berlin');
+      // Choose the option explicitly: Enter on a value equal to the current one commits the highlighted popular city instead.
+      await page.getByRole('option').filter({ hasText: /^Berlin/ }).first().click();
+      await poll(async () => /^Berlin(?:,|$)/.test(await city.inputValue()), 'Old city set to Berlin');
+      await panel.getByTestId('home-neighborhood').fill('Kreuzberg');
+      const homeResponse = page.waitForResponse(r => apiPath(r, '/api/home') && /^kreuzberg$/i.test(postJson(r)?.source?.neighborhood ?? ''), { timeout: LOAD_TIMEOUT + 15_000 });
+      void homeResponse.catch(() => {});
+      const begin = performance.now();
+      await panel.getByTestId('home-submit').click();
+      const response = await homeResponse;
+      assert.ok(response.ok(), `/api/home HTTP ${response.status()}`);
+      const body = await response.json();
+      const requestCity = postJson(response)?.source?.city;
+      assert.match(requestCity, /^Berlin/, `Request old city was ${requestCity}`);
+      const matches = panel.locator('ol > li');
+      await poll(async () => await matches.count() >= 1, 'At least one rendered match', LOAD_TIMEOUT);
+      let evidence;
+      await poll(async () => {
+        for (const li of await matches.all()) {
+          const text = await li.innerText();
+          const sim = text.match(/(\d{1,3})\s*%\s*alike/);
+          const twins = await li.getByText('at home', { exact: true }).count();
+          const shares = await li.getByText('Shares', { exact: true }).count();
+          if (sim && (twins || shares)) { evidence = { name: text.split('\n').map(s => s.trim()).filter(Boolean)[1], similarity: Number(sim[1]), twinPairs: twins, sharedTags: !!shares }; return true; }
+        }
+        return false;
+      }, 'A match with "% alike" and a twin pair (old place → new place) or Shares tags', LOAD_TIMEOUT);
+      assert.ok(evidence.similarity > 0 && evidence.similarity <= 100, `Similarity out of range: ${evidence.similarity}`);
+      const legend = page.getByText(/The terrain shows\s+Kreuzberg, Berlin\s+printed over Lisbon/);
+      await legend.waitFor({ state: 'visible' });
+      const ms = Math.round(performance.now() - begin);
+      await mapReady(page);
+      await shot(page, 'home-kreuzberg');
+      return { responseMs: ms, apiMatches: body.matches.length, renderedMatches: await matches.count(), top: evidence, legend: await legend.innerText() };
+    });
+  });
+  await scenario('19', 'Check an address: Rua da Rosa 120, then a map click', async () => {
+    let first;
+    const checked = await step('Rua da Rosa 120 shows Better than N%, its neighborhood and walk places with minutes', page, async () => {
+      assert.ok(chipState?.l?.length >= 2, 'Resolved taste state unavailable');
+      await page.goto(urlFor(chipState, '/explore/address'), { waitUntil: 'domcontentloaded' });
+      const panel = page.getByTestId('address-screen');
+      await panel.waitFor({ state: 'visible' });
+      await page.getByTestId('address-input').fill('Rua da Rosa 120');
+      const spotResponse = page.waitForResponse(r => apiPath(r, '/api/spot') && postJson(r)?.query === 'Rua da Rosa 120', { timeout: LOAD_TIMEOUT });
+      void spotResponse.catch(() => {});
+      await page.getByTestId('address-submit').click();
+      const response = await spotResponse;
+      assert.ok(response.ok(), `/api/spot HTTP ${response.status()}`);
+      const percentile = page.getByTestId('spot-percentile');
+      await percentile.waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+      const n = Number((await percentile.innerText()).match(/Better than\s*(\d+)\s*%/)?.[1]);
+      assert.ok(n > 0 && n <= 100, `Better than N% out of range: ${await percentile.innerText()}`);
+      const hood = panel.getByText(/^In .+, ranked #\d+ for you$/);
+      await hood.waitFor({ state: 'visible' });
+      const hoodName = (await hood.innerText()).match(/^In (.+), ranked #\d+/)[1].trim();
+      assert.ok(hoodName.length > 1, 'Empty neighborhood name');
+      const walk = panel.locator('a[href]').filter({ hasText: /\d+\s*min/ });
+      await poll(async () => await walk.count() >= 1, 'At least one walk place with minutes');
+      const walkFirst = (await walk.first().innerText()).replace(/\s+/g, ' ').trim();
+      const label = await percentile.locator('xpath=preceding-sibling::p[1]').innerText();
+      first = { label, percentile: n };
+      await mapReady(page);
+      await shot(page, 'address-rua-da-rosa');
+      return { label, percentile: n, neighborhood: hoodName, walkPlaces: await walk.count(), firstWalk: walkFirst };
+    });
+    await step('A click on the map checks that point; its label is not raw coordinates', page, async () => {
+      assert.ok(checked, 'Dependency failed: typed address check did not complete');
+      // Let the camera finish flying to the pin before clicking, so the click lands where it was aimed.
+      let last;
+      await poll(async () => {
+        const box = await page.locator('.hm-pin').first().boundingBox();
+        const same = box && last && Math.abs(box.x - last.x) < 1 && Math.abs(box.y - last.y) < 1;
+        last = box;
+        await page.waitForTimeout(400);
+        return same;
+      }, 'Map camera settled on the pin', LOAD_TIMEOUT);
+      // A bare map point (not a neighborhood plate, pin or panel) about 180 px from the pin.
+      const target = await page.evaluate(() => {
+        const canvas = document.querySelector('canvas.maplibregl-canvas');
+        const r = canvas.getBoundingClientRect();
+        const panel = document.querySelector('[data-testid="address-screen"]').getBoundingClientRect();
+        const pin = document.querySelector('.hm-pin')?.getBoundingClientRect();
+        const px = pin ? pin.left + pin.width / 2 : (panel.right + r.right) / 2;
+        const py = pin ? pin.top + pin.height / 2 : (r.top + r.bottom) / 2;
+        let best;
+        for (let y = r.top + 120; y < r.bottom - 60; y += 17) for (let x = Math.max(r.left, panel.right) + 40; x < r.right - 40; x += 19) {
+          if (document.elementFromPoint(x, y) !== canvas) continue;
+          const score = Math.abs(Math.hypot(x - px, y - py) - 180);
+          if (!best || score < best.score) best = { x: Math.round(x), y: Math.round(y), score };
+        }
+        return best;
+      });
+      assert.ok(target, 'No bare map point available to click');
+      const spotResponse = page.waitForResponse(r => apiPath(r, '/api/spot') && Array.isArray(postJson(r)?.point) && !postJson(r)?.query, { timeout: LOAD_TIMEOUT });
+      void spotResponse.catch(() => {});
+      await page.mouse.click(target.x, target.y);
+      const response = await spotResponse;
+      assert.ok(response.ok(), `/api/spot (point) HTTP ${response.status()}`);
+      const body = await response.json();
+      const percentile = page.getByTestId('spot-percentile');
+      const labelEl = percentile.locator('xpath=preceding-sibling::p[1]');
+      const label = await poll(async () => { const t = (await labelEl.innerText()).trim(); return t && t !== first.label && t; }, `Result label changes from "${first.label}"`, LOAD_TIMEOUT);
+      assert.ok(!coordLabel.test(label), `Clicked point label is raw coordinates: "${label}" (API label "${body.label}")`);
+      const n = Number((await percentile.innerText()).match(/Better than\s*(\d+)\s*%/)?.[1]);
+      assert.ok(n > 0 && n <= 100, `Better than N% out of range after the click: ${await percentile.innerText()}`);
+      // Move the pointer off the map so the hex hover card does not cover the pin label in the evidence.
+      await page.mouse.move(300, 120);
+      await page.waitForTimeout(600);
+      await shot(page, 'address-map-click');
+      return { clicked: target, point: postJson(response).point, label, apiLabel: body.label, percentile: n, before: first };
+    });
+  });
+  await scenario('20', 'What decides: summary and a row per love for the first neighborhood', async () => {
+    await step('Why shows the summary and, for #1, every love with a rank or Out of the top 8', page, async () => {
+      assert.ok(chipState?.l?.length >= 2, 'Resolved taste state unavailable');
+      const decides = page.waitForResponse(r => apiPath(r, '/api/decides') && r.ok(), { timeout: LOAD_TIMEOUT + 15_000 });
+      void decides.catch(() => {});
+      await page.goto(urlFor(chipState, '/explore/why'), { waitUntil: 'domcontentloaded' });
+      const panel = page.getByTestId('why-screen');
+      await panel.waitFor({ state: 'visible' });
+      const body = await (await decides).json();
+      assert.ok(body.summary?.trim(), 'Decides API returned no summary');
+      const summary = panel.getByText(body.summary.trim(), { exact: true });
+      await summary.waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
+      const loves = stateOf(page).l.filter(l => l.id && (l.w ?? 1) > 0);
+      const firstHood = panel.locator('section').first();
+      await firstHood.waitFor({ state: 'visible' });
+      const name = (await firstHood.getByRole('button').first().innerText()).replace(/\s+/g, ' ').replace(/^\d+\s*|\s*without each love$/g, '').trim();
+      const rows = firstHood.locator('li');
+      await poll(async () => await rows.count() === loves.length, `First neighborhood has one row per love (${loves.length})`);
+      const texts = (await rows.allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim());
+      for (const t of texts) assert.match(t, /#\d+|Out of the top 8/, `Row without a rank: "${t}"`);
+      for (const love of loves) assert.ok(texts.some(t => t.toLowerCase().includes((love.n || love.q).toLowerCase())), `No row for ${love.n || love.q}: ${JSON.stringify(texts)}`);
+      await mapReady(page);
+      await shot(page, 'why');
+      return { summary: body.summary, firstNeighborhood: name, rows: texts, robust: body.robust, pivotal: body.pivotal };
+    });
+  });
+  await scenario('21', 'Assistant home card opens on the map without a new home request', async () => {
+    let card;
+    const answered = await step('"I used to live in Kreuzberg, Berlin" streams text and a home card', page, async () => {
+      assert.ok(chipState?.l?.length >= 2, 'Resolved taste state unavailable');
+      await page.goto(urlFor(chipState, '/explore/assistant'), { waitUntil: 'domcontentloaded' });
+      const input = page.getByTestId('agent-input');
+      await input.waitFor({ state: 'visible' });
+      const agentResponse = page.waitForResponse(r => apiPath(r, '/api/agent') && r.request().method() === 'POST', { timeout: AGENT_TIMEOUT });
+      void agentResponse.catch(() => {});
+      await input.fill('I used to live in Kreuzberg, Berlin');
+      const begin = performance.now();
+      await input.press('Enter');
+      const response = await agentResponse;
+      assert.ok(response.ok(), `/api/agent HTTP ${response.status()}`);
+      const contentType = response.headers()['content-type'] || '';
+      assert.match(contentType, /event-stream|ndjson|text\/plain/, `Agent response is not a stream: ${contentType}`);
+      const turn = page.getByTestId('assistant-turn').last();
+      const reply = turn.getByTestId('assistant-reply');
+      const lengths = [];
+      let firstTextMs;
+      let textWhileStreaming = false;
+      await poll(async () => {
+        const done = await page.getByRole('button', { name: 'Send', exact: true }).count() > 0;
+        if (await reply.count()) {
+          const len = (await reply.innerText()).trim().length;
+          if (len && firstTextMs === undefined) firstTextMs = Math.round(performance.now() - begin);
+          if (len && lengths[lengths.length - 1] !== len) lengths.push(len);
+          if (len && !done) textWhileStreaming = true;
+        }
+        return done && lengths.length && lengths[lengths.length - 1] >= 20;
+      }, 'Streamed reply of >= 20 characters and the answer finished', AGENT_TIMEOUT);
+      card = turn.locator('div').filter({ has: page.getByText(/Kreuzberg, Berlin in /) }).filter({ has: page.getByRole('button', { name: /Open on the map/ }) }).last();
+      await card.waitFor({ state: 'visible' });
+      const cardText = (await card.innerText()).replace(/\s+/g, ' ').trim();
+      assert.match(cardText, /\d+%/, `Home card has no similarity: ${cardText}`);
+      await shot(page, 'assistant-home-card');
+      return { contentType, firstTextMs, textWhileStreaming, totalMs: Math.round(performance.now() - begin), streamedLengths: lengths, reply: await reply.innerText(), card: cardText };
+    });
+    await step('Open on the map lands on /explore/home with the result and no /api/home request', page, async () => {
+      assert.ok(answered && card, 'Dependency failed: no home card');
+      const homeRequests = [];
+      const onRequest = r => { if (apiPath(r, '/api/home')) homeRequests.push({ url: r.url(), body: r.postData() }); };
+      page.on('request', onRequest);
+      try {
+        await card.getByRole('button', { name: /Open on the map/ }).click();
+        await page.waitForURL(isPath('/explore/home'));
+        const panel = page.getByTestId('home-screen');
+        await panel.waitFor({ state: 'visible' });
+        const matches = panel.locator('ol > li');
+        await poll(async () => await matches.count() >= 1, 'Home result shown on the Home screen');
+        const legend = page.getByText(/The terrain shows\s+Kreuzberg, Berlin\s+printed over/);
+        await legend.waitFor({ state: 'visible' });
+        assert.equal(await panel.getByTestId('home-neighborhood').inputValue(), 'Kreuzberg');
+        stateOf(page);
+        // Give a stray refetch time to appear before declaring there was none.
+        await page.waitForTimeout(3000);
+        assert.equal(homeRequests.length, 0, `Opening the card refetched /api/home: ${JSON.stringify(homeRequests)}`);
+        await mapReady(page);
+        await shot(page, 'home-from-assistant');
+        return { path: pathOf(page), matches: await matches.count(), legend: await legend.innerText(), homeRequests: 0 };
+      } finally { page.off('request', onRequest); }
+    });
+  });
   await scenario('10', 'No unexpected console.error or uncaught page errors across all pages', async () => {
     await step('Audit all scenarios, desktop/mobile/new-tab console and pageerror', page, async () => {
       await Promise.all(pendingEvidence);
@@ -669,4 +990,4 @@ try {
 await saveReport();
 const failures = results.filter(r => r.status === 'FAIL').length;
 console.log(`\n${results.length - failures} PASS / ${failures} FAIL — ${resolve(reportDir, 'report.md')}`);
-if (failures || results.length !== 16) process.exitCode = 1;
+if (failures || results.length !== (ONLY ? ONLY.length : SCENARIO_COUNT)) process.exitCode = 1;
