@@ -46,7 +46,7 @@ export function VisitAudit({ result }: { result: VisitResultV2 }) {
       )}
       {unmet.length > 0 && (
         <div className="rounded-[12px] bg-paper-sunk/80 px-3 py-2 text-[13px] leading-snug text-ink-2" data-testid="visit-unmet">
-          <p className="font-[600] text-ink">Not everything you asked for is in this walk</p>
+          <p className="font-[600] text-ink">What this walk could not include</p>
           <ul className="mt-0.5 list-disc pl-4">
             {[...new Set(unmet.map((u) => sentence(noIds(unmetText(u.reason), names))))].map((line) => (
               <li key={line}>{line}</li>

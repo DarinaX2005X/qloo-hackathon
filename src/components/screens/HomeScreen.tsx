@@ -10,6 +10,7 @@ import { Button, Segmented, Skeleton, Spinner } from "@/components/ui/primitives
 import { CityPicker, cityName } from "@/components/ui/CityPicker";
 import { HOME_BLEND_LAMBDA, useFeatures } from "./features";
 import { HomeMatchesCard } from "./decision";
+import { useGoTo } from "@/components/explore/nav";
 import { areaName } from "./venue";
 import { ErrorNote, MapNote, ScreenPanel, ScreenTitle, platesOf, useAreaActions, useMapOverlay } from "./shared";
 
@@ -37,6 +38,7 @@ export function HomeScreen() {
   const ex = useExplore();
   const f = useFeatures();
   const actions = useAreaActions();
+  const goTo = useGoTo();
   const here = cityName(ex.state.city);
   const [oldCity, setOldCity] = useState(() => f.home.request?.city ?? "Berlin");
   const [hood, setHood] = useState(() => f.home.request?.neighborhood ?? "");
@@ -210,6 +212,7 @@ export function HomeScreen() {
                       }
                     : undefined
                 }
+                onAddLoves={hasLoves ? undefined : () => goTo("/explore")}
               />
             </div>
           )}

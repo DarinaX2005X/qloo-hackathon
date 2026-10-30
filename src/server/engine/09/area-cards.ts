@@ -56,7 +56,7 @@ export function leadingConnection(anchors: VenueEvidence[], state: ExploreState)
     }
   }
   const ordered = [...totals].sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]));
-  return ordered[0] ? { ...ordered[0][1], tied: !!ordered[1] && Math.abs(ordered[0][1].total - ordered[1][1].total) < 1e-9 } : null;
+  return ordered[0] ? { ...ordered[0][1], clearlyLeading: loves.size === 1 || ordered[0][1].total / Math.max(1, anchors.length) > 1 / loves.size + .1, allLinked: totals.size === loves.size, tied: !!ordered[1] && Math.abs(ordered[0][1].total - ordered[1][1].total) < 1e-9 } : null;
 }
 
 /** Describes tags on the shown places, never a neighborhood's people or housing. */
@@ -85,12 +85,13 @@ export function distinctiveStyle(anchors: VenueEvidence[], citySample: PlaceV2[]
 
 type CardContext = { area: AreaIdentity; anchors: VenueEvidence[]; ownedVenues?: VenueEvidence[]; citySample: PlaceV2[]; neutralByArea: Map<string, VenueEvidence[]>; state?: ExploreState };
 export function areaCardCopy({ area, anchors, ownedVenues = anchors, citySample, neutralByArea, state }: CardContext): { headline: string; tradeoff: string } {
-  if (!anchors.length) return { headline: `No eligible places were verified for ${area.name}'s own circle.`, tradeoff: "Check local places before choosing this area; overlapping areas' places are listed only once." };
+  if (!anchors.length) return { headline: `We could not verify places to visit in ${area.name}.`, tradeoff: "Check local places before choosing this area." };
   const link = state ? leadingConnection(anchors, state) : null;
   const style = distinctiveStyle(anchors, citySample);
-  const reason = link ? link.tied ? `${link.name} is a joint leading Qloo link.` : `${link.name} is the leading Qloo link.` : "";
-  const headline = style ? `${reason ? `${reason} ` : ""}${style.count} of ${anchors.length} places are tagged “${style.label}”, compared with ${style.cityCount} of ${style.cityTotal} in the city sample.`
-    : link ? `Qloo links ${link.name} to ${link.venue.place.name}.` : `${anchors[0].place.name} is one place to start in ${area.name}.`;
+  const reason = link ? link.clearlyLeading && !link.tied ? `Qloo links ${link.name} most strongly to these places.` : link.allLinked ? "Linked to all your loves." : "Linked to several of your loves." : "";
+  const example = style ? anchors.find(v => placeStyleFeatures(v.place).some(t => normalized(t.name) === normalized(style.label))) : undefined;
+  const detail = style && example ? `${example.place.name} is tagged \u201c${style.label}\u201d.` : `${anchors[0].place.name} is one place to start in ${area.name}.`;
+  const headline = `${reason ? `${reason} ` : ""}${detail}`;
 
   // Compare the same neutral sample/ownership rule across areas. Personal search
   // counts and missing metadata cannot establish real-world venue scarcity.
@@ -105,7 +106,9 @@ export function areaCardCopy({ area, anchors, ownedVenues = anchors, citySample,
     return local.length && observed <= count && typical >= 1 && count < typical ? [{ role, count, typical, gap: (typical - count) / typical }] : [];
   }).sort((a, b) => b.gap - a.gap || a.role.localeCompare(b.role));
   const deficit = deficits[0];
-  if (deficit) return { headline, tradeoff: `The checked catalog has ${deficit.count} ${deficit.role === "coffee" ? (deficit.count === 1 ? "café" : "cafés") : (deficit.count === 1 ? "culture stop" : "culture stops")} assigned here; the area median is ${deficit.typical}.` };
+  if (deficit) return { headline, tradeoff: deficit.count === 0
+    ? `We have not verified ${deficit.role === "coffee" ? "a caf\u00e9" : "a culture stop"} here yet. Check nearby options before visiting.`
+    : `We found fewer ${deficit.role === "coffee" ? "caf\u00e9s" : "culture stops"} here than in several other areas we checked.` };
   const event = anchors.find(v => v.hoursStatus === "event_required");
   if (event) return { headline, tradeoff: `Check ${event.place.name}'s event schedule and admission before visiting.` };
   const missingHours = anchors.filter(v => !v.place.hours || !Object.values(v.place.hours).some(spans => spans.length));

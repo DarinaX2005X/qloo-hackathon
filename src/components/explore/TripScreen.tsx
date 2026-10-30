@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, CalendarPlus, ChevronDown, Copy, Footprints, Plus, Route, Shuffle, X } from "lucide-react";
+import { ArrowRight, CalendarPlus, ChevronDown, Clock, Copy, Footprints, Plus, Route, Shuffle, X } from "lucide-react";
 import type { Itinerary, Place } from "@/shared/contracts";
 import { activeLoves } from "@/shared/contracts";
 import { useExplore } from "./store";
@@ -120,6 +120,7 @@ function Timeline() {
     );
   if (!plan) return null;
   const edited = ex.exclude.length + ex.include.length > 0;
+  const failedAgain = ex.plan.error ? <ErrorNote message={ex.plan.error.message} onRetry={() => void ex.makePlan()} /> : null;
   const city = cityName(ex.state.city);
   const areaOf = (name: string) => ex.analysis.data?.areas.find((a) => a.area.name === name);
   return (
@@ -128,6 +129,7 @@ function Timeline() {
         <h3 className="text-[19px] font-[650] tracking-[-0.02em]">Day by day</h3>
         <ExportButtons />
       </div>
+      {failedAgain && <div className="mb-3">{failedAgain}</div>}
       {edited && <p className="mb-3 text-[12.5px] text-ink-3">Your edits are kept when you change days, pace or start time.</p>}
       <div className="space-y-3">
         {plan.days.map((d, di) => {
@@ -287,10 +289,17 @@ function PlanPanel() {
           <PlanRules />
           <div className="mt-4 space-y-2">
             <PlanSettings />
-            <Button variant={ex.plan.data ? "secondary" : "primary"} size="md" className="w-full" disabled={ex.plan.loading || !hoods.length} onClick={() => void ex.makePlan()}>
-              {ex.plan.loading ? <Spinner size={15} /> : <CalendarPlus size={16} strokeWidth={1.9} />}
-              {ex.plan.data ? "Plan again" : "Plan my first days"}
-            </Button>
+            <div className="flex gap-2">
+              <Button variant={ex.plan.data ? "secondary" : "primary"} size="md" className="min-w-0 flex-1" disabled={ex.plan.loading || !hoods.length} onClick={() => void ex.makePlan()}>
+                {ex.plan.loading ? <Spinner size={15} /> : <CalendarPlus size={16} strokeWidth={1.9} />}
+                {ex.plan.loading ? "Planning" : ex.plan.data ? "Plan again" : "Plan my first days"}
+              </Button>
+              {ex.plan.loading && (
+                <Button variant="secondary" size="md" onClick={ex.cancelPlan} data-testid="plan-cancel" aria-label="Cancel planning">
+                  <X size={15} /> Cancel
+                </Button>
+              )}
+            </div>
           </div>
           <div className="mt-5">
             <Timeline />
@@ -389,6 +398,55 @@ const nearestTime = (h: number | undefined): TimeValue => {
   return TIMES.reduce((best, t) => (Math.abs(Number(t.value) - x) < Math.abs(Number(best.value) - x) ? t : best), TIMES[1] as (typeof TIMES)[number]).value;
 };
 
+/** A walk that came back short: the ways to change it, each with what it changes. Rules are dropped only by an explicit click. */
+function VisitNextSteps({
+  startHour,
+  otherArea,
+  onTime,
+  onArea,
+}: {
+  startHour?: number;
+  otherArea: { area: { id: string; name: string } } | null;
+  onTime: (hour: number) => void;
+  onArea: (id: string) => void;
+}) {
+  const ex = useAgentStore();
+  const now = nearestTime(startHour);
+  const hard = dedupe(ex.constraints ?? []).filter((c) => c.strength === "hard" && c.source === "user");
+  const btn =
+    "flex min-h-9 max-w-full items-center gap-1.5 rounded-[10px] bg-paper-raised px-3 text-left text-[13px] font-[580] text-ink ring-1 ring-line transition-[transform,box-shadow] hover:-translate-y-px hover:shadow-[var(--shadow-rest)]";
+  return (
+    <div data-testid="visit-next" className="rounded-[14px] bg-paper-sunk/70 px-3 py-2.5">
+      <p className="text-[13px] font-[620] text-ink">Ways to change this walk</p>
+      <p className="mt-0.5 text-[12.5px] leading-snug text-ink-2">Each one plans the walk again. Your rules stay unless you drop one here yourself.</p>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {TIMES.filter((t) => t.value !== now).map((t) => (
+          <button key={t.value} className={btn} onClick={() => onTime(Number(t.value))}>
+            <Clock size={13} className="shrink-0 text-ink-3" /> Start in the {t.label.toLowerCase()}
+          </button>
+        ))}
+        {otherArea && (
+          <button className={btn} onClick={() => onArea(otherArea.area.id)}>
+            <Route size={13} className="shrink-0 text-ink-3" /> <span className="truncate">Try {otherArea.area.name} instead</span>
+          </button>
+        )}
+      </div>
+      {hard.length > 0 && ex.removeConstraint && (
+        <div className="mt-2">
+          <p className="text-[12px] font-[560] text-ink-3">Or drop a rule (places it kept out may come back)</p>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {hard.map((c) => (
+              <button key={c.id} className={btn} onClick={() => ex.removeConstraint!(c.id)}>
+                <X size={13} className="shrink-0 text-ink-3" /> <span className="truncate">Drop “{constraintLabel(c)}”</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** "Try this neighborhood": one calm walk of three or four places in an area from the shortlist (§13.4). */
 function VisitPanel() {
   const ex = useAgentStore();
@@ -475,25 +533,30 @@ function VisitPanel() {
               />
             </div>
           </div>
-          <div className="mt-4">
+          <div className="mt-4 flex gap-2">
             <Button
               variant={v.data ? "secondary" : "primary"}
               size="md"
-              className="w-full"
+              className="min-w-0 flex-1"
               disabled={v.loading || !current}
               onClick={() => current && build(current)}
               data-testid="visit-plan"
             >
               {v.loading && !swapping ? <Spinner size={15} /> : <Route size={16} strokeWidth={1.9} />}
-              {v.data ? "Plan again" : "Plan a walk here"}
+              {v.loading ? "Planning the walk" : v.data ? "Plan again" : "Plan a walk here"}
             </Button>
+            {v.loading && ex.cancelVisit && (
+              <Button variant="secondary" size="md" onClick={ex.cancelVisit} data-testid="visit-cancel" aria-label="Cancel planning the walk">
+                <X size={15} /> Cancel
+              </Button>
+            )}
           </div>
           <div className="mt-5" aria-busy={v.loading}>
             {v.error && !v.data && <ErrorNote message={v.error.message} onRetry={current ? () => build(current) : undefined} />}
             {v.loading && !v.data && (
               <div className="space-y-3" aria-label="Planning the walk">
                 <p className="flex items-center gap-2 text-[13.5px] text-ink-2">
-                  <Spinner size={14} /> Picking places that pass your rules
+                  <Spinner size={14} /> Picking places that pass your rules. This stops by itself after a minute; Cancel stops it now.
                 </p>
                 {[0, 1, 2].map((i) => (
                   <Skeleton key={i} className="h-[58px]" />
@@ -517,6 +580,14 @@ function VisitPanel() {
                 {moved && <p className="text-[13px] text-ink-2">Part of this walk is in another area; nothing closer to {name} passed your rules.</p>}
                 {v.error && <p className="text-[13px] text-[var(--err)]">{v.error.message}</p>}
                 <VisitAudit result={v.data} />
+                {!v.loading && current && (v.data.audit.unmet.length > 0 || stops.length < 3) && (
+                  <VisitNextSteps
+                    startHour={v.startHour}
+                    otherArea={choices.find((a) => a.area.id !== current) ?? null}
+                    onTime={(hour) => void ex.buildVisit!(current, { startHour: hour, excludeIds: v.areaIds[0] === current ? v.excludeIds : [] })}
+                    onArea={(id) => build(id)}
+                  />
+                )}
                 <RecoveryLog result={v.data} />
                 <VisitStops
                   result={v.data}

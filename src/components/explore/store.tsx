@@ -31,7 +31,7 @@ import { emptySessionMemory } from "@/shared/contracts-09";
 import { applyPatches } from "@/shared/patches";
 import { decodeState, emptyState, encodeState } from "@/lib/state";
 import { pickEntity } from "@/lib/pick";
-import { api, api2, HomingError, isV2Event, streamAgentV2, type AnyAgentEvent } from "./api";
+import { api, api2, HomingError, isV2Event, SEARCH_TIMEOUT_MS, streamAgentV2, type AnyAgentEvent } from "./api";
 import { areaFromNeighborhood, legacyRules, neighborhoodFromArea, venueFromPlace, visitFromItinerary } from "./adapt";
 
 export type Load<T> = { data: T | null; loading: boolean; error: HomingError | null };
@@ -111,7 +111,14 @@ export type MapOverlay = {
   onMapClick?: (lngLat: [number, number]) => void;
 };
 
-type Pending = Record<string, true>; // queries being looked up
+/** A love being looked up: searching, or the search failed or ran out of time (kept with its text for Retry). */
+export type PendingLove = { status: "searching" | "failed"; query: string; message?: string };
+type Pending = Record<string, PendingLove>; // keyed `${target}:${query lower-cased}`
+
+/** Every wait on the client ends: a taste search, a walk, a plan and an assistant turn each have a deadline. */
+export const VISIT_TIMEOUT_MS = 60_000;
+export const PLAN_TIMEOUT_MS = 60_000;
+export const AGENT_CLIENT_TIMEOUT_MS = 90_000;
 
 /** Rules that shaped the current plan and are sent with every re-plan: whole categories and place tags
  *  left out (the assistant's "no museums"). Must-include places live in `include`. */
@@ -163,6 +170,7 @@ function useStore() {
   const planRef = useRef<Itinerary | null>(null);
   planRef.current = plan.data;
   const [pending, setPending] = useState<Pending>({});
+  const searchAc = useRef(new Map<string, AbortController>());
   const [chat, setChat] = useState<ChatTurn[]>([]);
   const [agentBusy, setAgentBusy] = useState(false);
   const agentBusyRef = useRef(false);
@@ -199,6 +207,7 @@ function useStore() {
   const dataCity = useRef<string | null>(null);
   /** bumps on every plan request and city change, so a late answer for an old request is dropped */
   const planSeq = useRef(0);
+  const planAc = useRef<AbortController | null>(null);
   /** bumps when the second person is removed, so their in-flight searches don't bring them back */
   const companionEpoch = useRef(0);
 
@@ -458,18 +467,41 @@ function useStore() {
     const rest = ranked.filter((n) => n.id !== first).map((n) => n.id);
     const ids = [first, ...rest].slice(0, s.days);
     const seq = ++planSeq.current;
-    setPlan({ data: null, loading: true, error: null });
-    setPlanFrom("planner");
+    planAc.current?.abort();
+    const ac = new AbortController();
+    planAc.current = ac;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort();
+    }, PLAN_TIMEOUT_MS);
+    // the plan on screen stays (dimmed) until the new one arrives
+    setPlan((p) => ({ data: p.data, loading: true, error: null }));
     try {
-      const data = await api.plan(s, ids, { exclude: ex, include: inc, excludeCategories: rules.excludeCategories, excludeTags: rules.excludeTags });
+      const data = await api.plan(s, ids, { exclude: ex, include: inc, excludeCategories: rules.excludeCategories, excludeTags: rules.excludeTags }, ac.signal);
       if (seq === planSeq.current) {
+        setPlanFrom("planner");
         setPlan({ data, loading: false, error: null });
         setPlanDay((d) => (d < data.days.length ? d : 0));
       }
     } catch (e) {
-      if (seq === planSeq.current) setPlan({ data: null, loading: false, error: e as HomingError });
+      if (seq !== planSeq.current) return;
+      const err = timedOut
+        ? new HomingError("qloo_unavailable", `Planning took longer than ${PLAN_TIMEOUT_MS / 1000} s, so it was stopped. Try again.`, true)
+        : (e as HomingError);
+      setPlan((p) => ({ data: p.data, loading: false, error: err.code === "aborted" ? null : err }));
+    } finally {
+      clearTimeout(timer);
+      if (seq === planSeq.current && planAc.current === ac) planAc.current = null;
     }
   }, [hoods.data]);
+  /** Stop waiting for the plan; the previous plan stays. */
+  const cancelPlan = useCallback(() => {
+    planSeq.current++;
+    planAc.current?.abort();
+    planAc.current = null;
+    setPlan((p) => ({ ...p, loading: false, error: null }));
+  }, []);
 
   // re-plan when trip settings change and a plan exists
   const hadPlan = !!plan.data;
@@ -481,6 +513,7 @@ function useStore() {
   // a new city starts with a clean slate of plan edits
   useEffect(() => {
     planSeq.current++;
+    planAc.current?.abort();
     setPlan(idle());
     setExclude([]);
     setInclude([]);
@@ -488,6 +521,7 @@ function useStore() {
     setOpenPlace(null);
     setCompare([]);
     visitSeq.current++;
+    visitAc.current?.abort();
     setVisit(noVisit());
   }, [state.city]);
 
@@ -602,6 +636,7 @@ function useStore() {
   const visitRef = useRef(visit);
   visitRef.current = visit;
   const visitSeq = useRef(0);
+  const visitAc = useRef<AbortController | null>(null);
   const requestVisit = useCallback(
     async (areaIds: string[], opts: { includeIds?: string[]; excludeIds?: string[]; replacePlaceId?: string; from?: VisitSlot["from"]; startHour?: number } = {}) => {
       const ids = [...new Set(areaIds)].slice(0, 3);
@@ -610,6 +645,14 @@ function useStore() {
       const cons = constraintsRef.current;
       const rev = revRef.current;
       const seq = ++visitSeq.current;
+      visitAc.current?.abort();
+      const ac = new AbortController();
+      visitAc.current = ac;
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        ac.abort();
+      }, VISIT_TIMEOUT_MS);
       const excludeIds = [...new Set(opts.excludeIds ?? (visitRef.current.areaIds.join() === ids.join() ? visitRef.current.excludeIds : []))].slice(0, 100);
       const prior = opts.replacePlaceId ? visitRef.current.data?.itinerary : undefined;
       // the visit keeps the start hour it was built with when it is swapped or re-planned
@@ -632,6 +675,7 @@ function useStore() {
             ...(startHour !== undefined ? { startHour } : {}),
           },
           { excludeCategories: rules.excludeCategories, excludeTags: rules.excludeTags },
+          ac.signal,
         );
         if (seq !== visitSeq.current) return;
         if (r.v === 2 && r.data.meta.stateRevision !== rev) return;
@@ -639,11 +683,29 @@ function useStore() {
         setVisit({ data, loading: false, error: null, stale: false, areaIds: ids, from: opts.from ?? "planner", legacy: r.v === 1, revision: rev, excludeIds, startHour });
       } catch (e) {
         if (seq !== visitSeq.current) return;
-        setVisit((v) => ({ ...v, loading: false, error: e as HomingError }));
+        // a cancelled walk keeps the last one on screen; a walk that ran out of time says so and can be retried
+        const err = timedOut
+          ? new HomingError("qloo_unavailable", `Planning the walk took longer than ${VISIT_TIMEOUT_MS / 1000} s, so it was stopped. The last walk is kept. Try again, or pick another time or area.`, true)
+          : (e as HomingError);
+        setVisit((v) => ({ ...v, loading: false, error: err.code === "aborted" ? null : err }));
+      } finally {
+        clearTimeout(timer);
+        // the controls come back whatever happened to this request
+        if (seq === visitSeq.current) {
+          if (visitAc.current === ac) visitAc.current = null;
+          setVisit((v) => (v.loading ? { ...v, loading: false } : v));
+        }
       }
     },
-    [],
+    [setVisit],
   );
+  /** Stop waiting for the walk being planned; the last walk stays and the controls come back. */
+  const cancelVisit = useCallback(() => {
+    visitSeq.current++;
+    visitAc.current?.abort();
+    visitAc.current = null;
+    setVisit((v) => ({ ...v, loading: false, error: null }));
+  }, [setVisit]);
   /** Build a short visit of one area (or keep the current visit's areas when called again). */
   const buildVisit = useCallback(
     (areaId: string, opts: { includeIds?: string[]; excludeIds?: string[]; startHour?: number } = {}) =>
@@ -654,6 +716,7 @@ function useStore() {
   const openVisit = useCallback(
     (result: VisitResultV2, areaIds: string[]) => {
       visitSeq.current++;
+      visitAc.current?.abort();
       const cons = result.constraints;
       // the plan's constraints become the session's, so Plan again and Swap keep them
       agentCommit([], cons);
@@ -663,7 +726,7 @@ function useStore() {
       const startHour = Number.isFinite(hour) && hour >= 6 && hour <= 22 ? hour : undefined;
       setVisit({ data: result, loading: false, error: null, stale: false, areaIds, from: "assistant", legacy: false, revision: revRef.current, excludeIds: [], startHour });
     },
-    [agentCommit],
+    [agentCommit, setVisit],
   );
   const stopIds = (v: VisitResultV2 | null) => (v ? v.itinerary.days.flatMap((d) => d.stops.map((st) => st.place.id)) : []);
   /** Replace one stop; every other stop id is kept. */
@@ -705,13 +768,33 @@ function useStore() {
       if (!q) return;
       const key = `${target}:${q.toLowerCase()}`;
       const epoch = companionEpoch.current;
-      setPending((p) => ({ ...p, [key]: true }));
-      let love: ResolvedLove = { query: q, chosen: null, candidates: [], weight: 1 };
+      // one search per love: a retry replaces the earlier one, and Remove aborts it
+      searchAc.current.get(key)?.abort();
+      const ac = new AbortController();
+      searchAc.current.set(key, ac);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        ac.abort();
+      }, SEARCH_TIMEOUT_MS);
+      setPending((p) => ({ ...p, [key]: { status: "searching", query: q } }));
+      let love: ResolvedLove | null = null;
+      let failure: string | null = null;
       try {
-        const results = await api.search(q);
+        const results = await api.search(q, undefined, ac.signal);
+        // no match is an answer (the chip says "Not in the taste graph"); a failed search is not
         love = { query: q, chosen: pickEntity(q, results), candidates: results, weight: 1 };
-      } catch {
-        /* keep unresolved; the chip explains */
+      } catch (e) {
+        failure = timedOut ? `No answer from the taste search in ${SEARCH_TIMEOUT_MS / 1000} s.` : (e as Error).message || "The taste search failed.";
+      } finally {
+        clearTimeout(timer);
+      }
+      // removed, or searched again, while this one ran: its answer is dropped
+      if (searchAc.current.get(key) !== ac) return;
+      searchAc.current.delete(key);
+      if (!love) {
+        setPending((p) => ({ ...p, [key]: { status: "failed", query: q, message: failure ?? undefined } }));
+        return;
       }
       setPending((p) => {
         const n = { ...p };
@@ -728,6 +811,18 @@ function useStore() {
     },
     [patch],
   );
+
+  /** Take a love that is still being looked up (or whose search failed) off the list; never blocked by the search. */
+  const removePending = useCallback((query: string, target: "you" | "them" = "you") => {
+    const key = `${target}:${query.trim().slice(0, 120).toLowerCase()}`;
+    searchAc.current.get(key)?.abort();
+    searchAc.current.delete(key);
+    setPending((p) => {
+      const n = { ...p };
+      delete n[key];
+      return n;
+    });
+  }, []);
 
   const addResolved = useCallback(
     (loves: ResolvedLove[], target: "you" | "them" = "you") => {
@@ -788,6 +883,12 @@ function useStore() {
       setAgentBusy(true);
       const ac = new AbortController();
       agentAbort.current = ac;
+      // a backstop over the server's own limit: the turn always ends, and what already arrived stays
+      let timedOut = false;
+      const deadline = setTimeout(() => {
+        timedOut = true;
+        ac.abort();
+      }, AGENT_CLIENT_TIMEOUT_MS);
       const upd = (fn: (t: ChatTurn) => ChatTurn) => setChat((c) => c.map((t) => (t.id === uid + 1 ? fn(t) : t)));
       /** the person changed the inputs after this turn started: its patches would overwrite newer choices */
       const overtaken = () => inputEpoch.current !== startEpoch;
@@ -857,7 +958,12 @@ function useStore() {
         },
         ac.signal,
       );
-      upd((t) => ({ ...t, pending: false, stopped: ac.signal.aborted && !t.error ? true : t.stopped }));
+      clearTimeout(deadline);
+      upd((t) =>
+        timedOut && t.pending
+          ? { ...t, pending: false, error: t.error ?? `No final answer after ${AGENT_CLIENT_TIMEOUT_MS / 1000} s, so Homing stopped waiting. Anything that already arrived is kept above. Try again.` }
+          : { ...t, pending: false, stopped: ac.signal.aborted && !t.error ? true : t.stopped },
+      );
       if (agentAbort.current === ac) agentAbort.current = null;
       agentBusyRef.current = false;
       setAgentBusy(false);
@@ -987,6 +1093,9 @@ function useStore() {
     selected,
     pending,
     addLove,
+    removePending,
+    cancelVisit,
+    cancelPlan,
     addResolved,
     updateLove,
     loadCandidates,

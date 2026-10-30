@@ -44,7 +44,7 @@ describe("exclusive area card evidence", () => {
     const pools = assignAreaVenues(areas, [venue("east-1", .005), venue("east-2", .006, "culture")]);
     expect(pickAnchors(pools.get("west")!)).toEqual([]);
     const copy = areaCardCopy({ area: areas[0], anchors: [], citySample: [], neutralByArea: pools });
-    expect(copy.headline).toContain("No eligible places were verified");
+    expect(copy.headline).toContain("We could not verify places to visit");
   });
   it("deduplicates Home cards without altering signature overlap or the signature inputs", () => {
     const shared = styled(venue("shared", .004), "Historic").place;
@@ -73,20 +73,26 @@ describe("exclusive area card evidence", () => {
     invalid.connections[1].evidenceIds = [];
     expect(leadingConnection([invalid], profile)).toBeNull();
   });
+  it("does not call a near-even contribution a leading love", () => {
+    const profile = state({ loves: [love("a"), love("b")] });
+    const context = { area: areas[0], citySample: [], neutralByArea: new Map(), state: profile };
+    expect(areaCardCopy({ ...context, anchors: [linked(venue("one", 0), .55, .45)] }).headline).toContain("Linked to all your loves.");
+    expect(areaCardCopy({ ...context, anchors: [linked(venue("one", 0), .65, .35)] }).headline).toContain("Qloo links a most strongly");
+  });
   it("compares meaningful tags against a deduplicated city sample, without inventing affinity", () => {
     const anchors = [styled(venue("one", 0), "Historic"), styled(venue("two", 0), "Historic"), styled(venue("three", 0), "Casual")];
     const city = [anchors[0].place, venue("neutral-1", 0).place, venue("neutral-2", 0).place, venue("neutral-3", 0).place];
     expect(distinctiveStyle(anchors, [...city, city[0]])).toEqual({ label: "Historic", count: 2, cityCount: 1, cityTotal: 4 });
     const copy = areaCardCopy({ area: areas[0], anchors, citySample: city, neutralByArea: new Map() });
-    expect(copy.headline).toContain("2 of 3 places are tagged “Historic”, compared with 1 of 4 in the city sample.");
+    expect(copy.headline).toContain("one is tagged “Historic”.");
     expect(copy.headline).not.toContain("Qloo links");
     expect(distinctiveStyle([styled(venue("generic", 0), "Casual")], city)).toBeNull();
   });
   it("reports catalog deficits as sample counts, and missing hours from metadata rather than visit status", () => {
     const culture = venue("museum", 0, "culture");
     const neutralByArea = new Map([["west", [culture]], ["east", [venue("cafe-1", .006), venue("cafe-2", .006)]]]);
-    expect(areaCardCopy({ area: areas[0], anchors: [culture], citySample: [], neutralByArea }).tradeoff).toContain("checked catalog has 0 cafés assigned here; the area median is 1");
-    expect(areaCardCopy({ area: areas[0], anchors: [culture, venue("discovered-cafe", 0)], citySample: [], neutralByArea }).tradeoff).not.toContain("0 cafés");
+    expect(areaCardCopy({ area: areas[0], anchors: [culture], citySample: [], neutralByArea }).tradeoff).toContain("We have not verified a café here yet.");
+    expect(areaCardCopy({ area: areas[0], anchors: [culture, venue("discovered-cafe", 0)], citySample: [], neutralByArea }).tradeoff).not.toContain("We have not verified a café");
     const known = venue("known-hours", 0);
     known.place.hours = { monday: [{ opens: "09:00", closes: "18:00" }] };
     const missing = venue("missing-hours", 0);

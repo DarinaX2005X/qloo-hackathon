@@ -139,6 +139,17 @@ async function run(raw: AgentRequestV2, emit: (event: AgentEventV2) => void, par
       const ranked = await perform("rank_areas", envelope(), g);
       if (ranked) {
         areas = ranked.areas;
+        if (/\bwhy\b[^?]*\bnot\b/i.test(input.message)) {
+          const parts = input.message.split(/\bnot\b/i), alternativeText = normalized(parts.slice(1).join(" not "));
+          const mentioned = (area: AreaDecision, text: string) => [area.area.name, ...area.area.aliases].some(name => (` ${text} `).includes(` ${normalized(name)} `));
+          const preferred = areas.find(a => mentioned(a, normalized(parts[0]))) ?? areas[0];
+          const alternative = areas.find(a => mentioned(a, alternativeText));
+          if (preferred && alternative && preferred.area.id !== alternative.area.id) statusClaims.push({
+            text: `${preferred.area.name} ranks #${preferred.metrics.rank} of ${preferred.metrics.candidateCount}. ${preferred.headline} ${alternative.area.name} ranks #${alternative.metrics.rank} of ${alternative.metrics.candidateCount}. ${alternative.headline}${Math.abs(preferred.metrics.tasteScore - alternative.metrics.tasteScore) <= .01 ? " Their taste scores are close." : ""}`,
+            evidenceIds: ranked.evidence.map(e => e.id),
+          });
+          else if (!alternative) statusClaims.push({ text: "I could not identify the other area in the areas checked for this city. Choose its name from the map to compare it.", evidenceIds: [] });
+        }
         const previous = availableResults().findLast(r => r.card.kind === "areas" && r.meta.profileHash === profileHash(input.state, input.memory.constraints) && r.meta.manifestVersion === ranked.meta.manifestVersion);
         if (plan.ops.some(op => op.op === "set_weight") && previous?.card.kind === "areas" && previous.card.areas[0] && areas[0]) {
           const before = previous.card.areas[0], after = areas[0];
@@ -182,7 +193,7 @@ async function run(raw: AgentRequestV2, emit: (event: AgentEventV2) => void, par
     }
     if (!areaId) { needInput(g, address ? "The address is outside the named comparison areas. Select a nearby area on the map for the visit." : "Choose an area on the map for this visit."); return; }
     const visitState = { ...state, days: plan.visit?.days ?? (replacing ? prior?.itinerary.days.length as 1 | 2 | 3 : 1) ?? 1, pace: plan.visit?.pace ?? "relaxed" };
-    await perform("build_visit", PlanRequestV2.parse({ ...envelope(), state: visitState, areaIds: replacing ? stored!.areaIds : [areaId], date: plan.visit?.date, startHour: plan.visit?.startHour,
+    await perform("build_visit", PlanRequestV2.parse({ ...envelope(), state: visitState, allowContextExpansion: !address && !goal("evaluate_address"), areaIds: replacing ? stored!.areaIds : [areaId], date: plan.visit?.date, startHour: plan.visit?.startHour,
       excludeIds: memory.rejectedPlaceIds, includeIds: replacing ? prior!.itinerary.days.flatMap(d => d.stops.map(s => s.place.id)).filter(id => id !== replacePlaceId) : memory.savedPlaceIds,
       ...(replacing ? { existingItinerary: prior!.itinerary, replacePlaceId } : {}) }), g);
   }
@@ -234,7 +245,7 @@ async function run(raw: AgentRequestV2, emit: (event: AgentEventV2) => void, par
   }
   if (!deps.acknowledged) send({ type: "ack", turnId: input.turnId, text: acknowledgement(input.message) });
   try {
-    if (!input.retryGoalId) commit([], mergeConstraints(memory.constraints, DecisionPlan.parse({}), input.message));
+
     if (input.retryGoalId) {
       const previous = retryTurn(input.sessionId, input.retryGoalId), target = previous?.goals.find(g => g.id === input.retryGoalId);
       if (!previous || !target) {
@@ -256,15 +267,18 @@ async function run(raw: AgentRequestV2, emit: (event: AgentEventV2) => void, par
     } else {
       const planStep = `${input.turnId}:understand`;
       send({ type: "step", turnId: input.turnId, stepId: planStep, status: "running", text: "Identifying the checks and requirements in your request" });
-      plan = await withSignal(deps.plan(input, signal), signal);
+      const preflight = guardPlan(DecisionPlan.parse({}), input);
+      plan = preflight.declined ? preflight : await withSignal(deps.plan(input, signal), signal);
       checkDeadline();
       plan = guardPlan(DecisionPlan.parse(plan), input);
       planningComplete = true;
       send({ type: "step", turnId: input.turnId, stepId: planStep, status: "done", text: "Prepared the checks for your request" });
       goals = planGoals(plan, input.message).map(kind => ({ id: `${input.turnId}:${kind}`, kind, status: "pending", resultIds: [], unmet: [] }));
     }
-    if (!plan.source && /home|familiar|closer|old neighbou?rhood/i.test(input.message)) plan.source = sourceFromMemory();
-    if (!plan.address && /nearby|around (?:the|that) address|near (?:the|that) flat|\bthere\b/i.test(input.message)) {
+    if (plan.declined) { needsPreparation = false; goals = []; statusClaims.push({ text: plan.clarification!, evidenceIds: [] }); }
+    else if (!input.retryGoalId) commit([], mergeConstraints(memory.constraints, DecisionPlan.parse({}), input.message));
+    if (!plan.declined && !plan.source && /home|familiar|closer|old neighbou?rhood/i.test(input.message)) plan.source = sourceFromMemory();
+    if (!plan.declined && !plan.address && /nearby|around (?:the|that) address|near (?:the|that) flat|\bthere\b/i.test(input.message)) {
       const previous = availableResults().findLast(r => r.card.kind === "address" && normalized(r.city) === normalized(state.city));
       if (previous?.card.kind === "address") address = { ...previous.card.result, meta: previous.meta, evidence: previous.evidence };
     }

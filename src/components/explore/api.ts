@@ -72,6 +72,8 @@ async function once<T>(path: string, init: RequestInit & { json?: unknown } = {}
 }
 
 const RETRY_MS = [900, 2400];
+/** A taste search that has not answered by then is shown as failed, with Retry and Remove. */
+export const SEARCH_TIMEOUT_MS = 12_000;
 
 /** Retries transient failures (cold start, network) quietly before the person sees an error. A rate limit
  *  is shown at once: the bucket refills over ~10 s, longer than a quiet retry should hang. */

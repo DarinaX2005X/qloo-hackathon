@@ -45,16 +45,17 @@ export function AreaRank({
       data-testid="area-rank"
       data-state={state}
       title={rankText(metrics)}
-      className={`inline-flex shrink-0 flex-col ${size === "sm" ? "items-end" : "items-start"} leading-none ${className}`}
+      className={`inline-flex max-w-full shrink-0 flex-col ${size === "sm" ? "items-end" : "items-start"} leading-none ${className}`}
     >
-      <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
+      {/* in a narrow column (Compare on a phone) "of 16 areas checked" and the note wrap below the number instead of running into the next column */}
+      <span className={`inline-flex max-w-full flex-wrap items-baseline gap-x-1 gap-y-0.5 ${size === "sm" ? "justify-end" : ""}`}>
         <span className={`tnum ${num} ${state === "limited" ? "text-ink-2" : "text-ink"}`}>#{rank}</span>
-        {of !== null && <span className={`${small} font-[540] text-ink-3`}>{size === "sm" ? `of ${of}` : `of ${of} areas checked`}</span>}
+        {of !== null && <span className={`${small} whitespace-nowrap font-[540] text-ink-3`}>{size === "sm" ? `of ${of}` : `of ${of} areas checked`}</span>}
       </span>
       {line && (
         <span
           data-testid="area-rank-note"
-          className={`mt-1 whitespace-nowrap ${size === "sm" ? "text-[11.5px]" : "text-[12.5px]"} font-[540] ${state === "limited" ? "text-ink-3" : state === "close" ? "text-ink-2" : "text-you-deep"}`}
+          className={`mt-1 max-w-full leading-snug ${size === "sm" ? "text-[11.5px]" : "text-[12.5px]"} font-[540] ${state === "limited" ? "text-ink-3" : state === "close" ? "text-ink-2" : "text-you-deep"}`}
         >
           {line}
         </span>

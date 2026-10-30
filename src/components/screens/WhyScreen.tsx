@@ -86,9 +86,10 @@ export function WhyScreen() {
                 data-testid="why-area"
                 className="rounded-[20px] bg-[color-mix(in_oklch,var(--you)_5%,var(--paper-raised))] p-4 ring-1 ring-[color-mix(in_oklch,var(--you)_22%,transparent)]"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="truncate text-[21px] font-[660] leading-tight tracking-[-0.02em]">{areaName(area.area)}</h3>
+                {/* the name wraps to two lines and the rank drops below it when the card is too narrow for both (phones) */}
+                <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+                  <div className="min-w-0 flex-1 basis-[180px]">
+                    <h3 data-testid="why-area-name" className="line-clamp-2 text-[21px] font-[660] leading-tight tracking-[-0.02em] [overflow-wrap:anywhere]">{areaName(area.area)}</h3>
                     <p className="mt-0.5 text-[12.5px] text-ink-3">{areaScale(area.area)}</p>
                   </div>
                   <AreaRank metrics={area.metrics} size="md" />

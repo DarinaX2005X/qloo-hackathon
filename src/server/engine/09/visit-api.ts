@@ -1,6 +1,6 @@
 import { apiError, type ExploreState, type Itinerary } from "@/shared/contracts";
 import type { AuditV2, Constraint, EvidenceRef, PlaceIntentV2, PlanRequestV2, PlanResponseV2, VenueEvidence, VisitResultV2 } from "@/shared/contracts-09";
-import { walkMinutes } from "../geo";
+import { haversine, walkMinutes } from "../geo";
 import { minutes, timeLabel } from "../plan";
 import { WEEKDAYS } from "../places";
 import { hash, normalized, resultMeta, uniqueEvidence } from "./core";
@@ -10,11 +10,12 @@ import { cityManifest, type CityManifest, type ManifestArea } from "./manifest";
 import { effectiveConstraints, loadVenuePool, musicIntent, type VenuePool } from "./venues-api";
 import { auditVenueRequirements, requiredVenueRoles } from "./address-api";
 
-export const VISIT_METHOD = "bounded-distinct-venue-visit-v2";
+export const VISIT_METHOD = "bounded-distinct-context-visit-v3";
 // Equal normalized names at different addresses are one day-level choice even
 // when the provider omits a chain ID (for example two branches of one cafe).
 const visitBrand = (v: VenueEvidence) => v.brandKey ?? brandKey(v.place) ?? `name:${normalized(v.place.name)}`;
 type VisitSlot = { label: string; intent: PlaceIntentV2; stay: number; earliest: number; fixedId?: string };
+const canExpand = (input: PlanRequestV2, constraints: Constraint[]) => input.allowContextExpansion !== false && constraints.length === 0;
 export type VisitPool = { area: ManifestArea; venues: VenueEvidence[]; radiusM: number };
 const processGlobal = globalThis as typeof globalThis & { __homingVisit09?: Map<string, PlanResponseV2> };
 const savedVisits: Map<string, PlanResponseV2> = processGlobal.__homingVisit09 ??= new Map<string, PlanResponseV2>();
@@ -56,7 +57,11 @@ export function scheduleVisit(input: PlanRequestV2, pools: VisitPool[], constrai
     const weekday = WEEKDAYS[dayDate.getUTCDay()];
     const previousGaps = prior?.days[dayIndex]?.missing ?? [];
     const day: Itinerary["days"][number] = { date: dayDate.toISOString().slice(0, 10), weekday, neighborhood: pool.area.identity.name, stops: [], missing: [...previousGaps], issues: [...(prior?.days[dayIndex]?.issues ?? [])] };
-    for (const gap of previousGaps) audit.unmet.push({ goalId: `visit:day${dayIndex + 1}:previous-gap`, reason: `The previous visit still has an unfilled stop: ${gap}.`, recoverable: true });
+    for (const gap of previousGaps) {
+      const reason = `The previous visit still has an unfilled stop: ${gap}.`;
+      if (constraints.length) audit.unmet.push({ goalId: `visit:day${dayIndex + 1}:previous-gap`, reason, recoverable: true });
+      else audit.warnings.push(reason);
+    }
     const slots = visitSlots(input.state, constraints, prior?.days[dayIndex], input.replacePlaceId, input.startHour);
     if (!prior && dayIndex === 0) for (const included of fixed.filter(v => input.includeIds.includes(v.place.id))) {
       const slot = slots.find(s => !s.fixedId && (s.intent === included.role || s.intent === "concert" && included.role === "live_music"));
@@ -68,7 +73,7 @@ export function scheduleVisit(input: PlanRequestV2, pools: VisitPool[], constrai
     for (const slot of slots) {
       const previous = day.stops.at(-1);
       const candidates = [...fixed, ...pool.venues].filter((v, i, all) => all.findIndex(other => other.place.id === v.place.id) === i)
-        .filter(v => !used.has(v.place.id) && !usedKeys.has(v.venueKey) && !brands.has(visitBrand(v)) && pointInArea([v.place.lon, v.place.lat], pool.area.identity) && (slot.fixedId ? v.place.id === slot.fixedId : !protectedIds.has(v.place.id)))
+        .filter(v => !used.has(v.place.id) && !usedKeys.has(v.venueKey) && !brands.has(visitBrand(v)) && (pointInArea([v.place.lon, v.place.lat], pool.area.identity) || pool.radiusM === 1600 && canExpand(input, constraints) && haversine(pool.area.identity.center, [v.place.lon, v.place.lat]) <= 1600) && (slot.fixedId ? v.place.id === slot.fixedId : !protectedIds.has(v.place.id)))
         .map(v => {
           const walk = previous ? walkMinutes([previous.place.lon, previous.place.lat], [v.place.lon, v.place.lat]) : 0;
           const time = Math.ceil(Math.max(at + walk, slot.earliest) / 5) * 5;
@@ -81,27 +86,28 @@ export function scheduleVisit(input: PlanRequestV2, pools: VisitPool[], constrai
       const chosen = candidates[0];
       if (!chosen) {
         day.missing.push(slot.label);
-        const reason = slot.fixedId ? "The retained place could not be revalidated for this slot and its constraints." : "No eligible venue is available for this role, time and set of constraints.";
+        const reason = slot.fixedId ? "We could not confirm that the saved place still fits this walk." : constraints.length ? `We could not find a ${slot.intent.replace(/_/g, " ")} stop that fits your rules and visit time.` : `We could not verify a ${slot.intent.replace(/_/g, " ")} stop for this visit time.`;
         day.issues!.push({ slot: slot.label, reason });
-        audit.unmet.push({ goalId: `visit:day${dayIndex + 1}:${slot.intent}`, reason, recoverable: !slot.fixedId });
+        if (constraints.length || slot.fixedId) audit.unmet.push({ goalId: `visit:day${dayIndex + 1}:${slot.intent}`, reason, recoverable: !slot.fixedId });
+        else audit.warnings.push(reason);
         continue;
       }
       const { v, time, walk, eligibility } = chosen;
-      const checked = { ...v, role: eligibility.role!, priceStatus: eligibility.priceStatus, hoursStatus: eligibility.hoursStatus, limitations: [...new Set([...v.limitations, ...eligibility.limitations])].filter(l => eligibility.hoursStatus !== "known_open" || !l.startsWith("Opening hours")) };
+      const checked = { ...v, insideArea: pointInArea([v.place.lon, v.place.lat], pool.area.identity), role: eligibility.role!, priceStatus: eligibility.priceStatus, hoursStatus: eligibility.hoursStatus, limitations: [...new Set([...v.limitations, ...eligibility.limitations])].filter(l => eligibility.hoursStatus !== "known_open" || !l.startsWith("Opening hours")) };
       venueEvidence[v.place.id] = checked;
       day.stops.push({ time: timeLabel(time), slot: slot.label, place: v.place, walkMin: Math.ceil(walk), hoursNote: eligibility.hoursStatus === "known_open" ? "open" : "hours not listed", walkIsApproximate: true,
-        reasonCodes: [...(!v.insideArea ? ["outside_selected_area"] : []), ...(eligibility.hoursStatus === "event_required" ? ["event_schedule_unverified"] : [])] });
+        reasonCodes: [...(!checked.insideArea ? ["outside_selected_area"] : []), ...(eligibility.hoursStatus === "event_required" ? ["event_schedule_unverified"] : [])] });
       used.add(v.place.id); usedKeys.add(v.venueKey); brands.add(visitBrand(v));
       at = time + slot.stay;
     }
-    day.note = "Walking times are estimates. Check current hours and admission before setting out.";
-    if (!day.stops.length) day.note = "No stops met the requested constraints for this day.";
+    day.note = `${pool.radiusM === 1600 ? "This walk includes the area within 1.6 km of the center; some stops may be beyond the 650 m neighborhood circle. " : ""}Walking times are estimates. Check current hours and admission before setting out.`;
+    if (!day.stops.length) day.note = constraints.length ? "No stops fit your rules for this day." : "We could not verify stops for this day.";
     itinerary.days.push(day);
   }
   for (const id of input.includeIds) if (!used.has(id)) audit.unmet.push({ goalId: "visit:include", reason: `Requested place ${id} could not be included with these constraints.`, recoverable: false });
   const requirements = auditVenueRequirements(Object.values(venueEvidence), constraints, "build_visit");
   audit.unmet.push(...requirements.unmet); audit.warnings.push(...requirements.warnings);
-  return { itinerary, constraints, venueEvidence, audit, recoveryLog: [], evidenceIds: [...new Set(Object.values(venueEvidence).flatMap(v => v.evidenceIds))] };
+  return { searchAreas: pools.map(p => ({ area: p.area.identity, radiusM: p.radiusM === 1600 ? 1600 : 650 })), itinerary, constraints, venueEvidence, audit, recoveryLog: [], evidenceIds: [...new Set(Object.values(venueEvidence).flatMap(v => v.evidenceIds))] };
 }
 export function auditVisit(result: VisitResultV2, input: PlanRequestV2): AuditV2 {
   const audit = structuredClone(result.audit);
@@ -119,14 +125,23 @@ export function auditVisit(result: VisitResultV2, input: PlanRequestV2): AuditV2
       if (!venue) { fail("The stop has no verified venue evidence."); continue; }
       if (ids.has(stop.place.id) || keys.has(venue.venueKey)) fail("The same venue is repeated.");
       if (brands.has(visitBrand(venue))) fail("A chain or venue name is repeated on the same day.");
-      if (!venue.insideArea) fail("A stop is outside the selected area.");
+      const scope = result.searchAreas?.[Math.min(dayIndex, result.searchAreas.length - 1)];
+      if (scope) {
+        const expanded = scope.radiusM === 1600 && canExpand(input, required);
+        if (!input.areaIds.includes(scope.area.id) || (!pointInArea([stop.place.lon, stop.place.lat], scope.area) && !(expanded && haversine(scope.area.center, [stop.place.lon, stop.place.lat]) <= 1600))) fail("A stop is outside the allowed walking area.");
+        if (scope.radiusM !== 650 && !expanded) fail("The walking area was widened despite a user rule.");
+        if (venue.insideArea !== pointInArea([venue.place.lon, venue.place.lat], scope.area)) fail("The stop's neighborhood boundary label is incorrect.");
+      } else if (!venue.insideArea) fail("A stop is outside the selected area.");
       if (minutes(stop.time) <= previous) fail("Visit times are not increasing.");
       previous = minutes(stop.time); ids.add(stop.place.id); keys.add(venue.venueKey); brands.add(visitBrand(venue));
       if (stop.place.id !== venue.place.id || stop.place.lat !== venue.place.lat || stop.place.lon !== venue.place.lon || stop.place.name !== venue.place.name) fail("The displayed stop differs from its verified venue.");
       const gate = venueEligibility(venue.place, venue.role, required, { excludeIds: excluded, weekday: day.weekday, minute: minutes(stop.time), requireKnownBudget: true });
       for (const reason of gate.reasons) fail(reason);
     }
-    if (!day.stops.length && !audit.unmet.some(u => u.goalId.startsWith(`visit:day${dayIndex + 1}:`))) audit.unmet.push({ goalId: `visit:day${dayIndex + 1}`, reason: "The requested day has no verified stops.", recoverable: true });
+    if (!day.stops.length && !audit.unmet.some(u => u.goalId.startsWith(`visit:day${dayIndex + 1}:`))) {
+      if (required.length) audit.unmet.push({ goalId: `visit:day${dayIndex + 1}`, reason: "The requested day has no verified stops.", recoverable: true });
+      else audit.warnings.push("We could not verify any stops for this day.");
+    }
   }
   return audit;
 }
@@ -156,6 +171,7 @@ export async function planV2(request: PlanRequestV2): Promise<PlanResponseV2> {
     const music = await loadVenuePool(manifest, input.state, { intent: role as PlaceIntentV2, constraints, center: pool.area.identity.center, radiusM: 650, area: pool.area.identity, excludeIds: input.excludeIds, deferHours: true });
     pool.venues.push(...music.venues); evidence.push(...music.evidence);
   }
+  if (canExpand(input, constraints) && input.existingItinerary?.days.some(d => d.stops.some(s => s.reasonCodes?.includes("outside_selected_area")))) for (const pool of pools) pool.radiusM = 1600;
   let result = scheduleVisit(input, pools, constraints, date, fixed);
   const recoveryLog: VisitResultV2["recoveryLog"] = [];
   // At most one role search per gap, four searches total. No hard condition changes.
@@ -171,12 +187,32 @@ export async function planV2(request: PlanRequestV2): Promise<PlanResponseV2> {
     }
   }
   if (recoveryLog.length) result = scheduleVisit(input, pools, constraints, date, fixed);
+  // An ordinary walk may use the same 1.6 km context as the area rank.
+  // User rules and address-local walks keep the original boundary.
+  if (canExpand(input, constraints)) {
+    let expanded = false;
+    for (const [index, pool] of pools.entries()) {
+      const days = result.itinerary.days.filter((_, i) => Math.min(i, pools.length - 1) === index);
+      const missing = days.flatMap(d => d.missing);
+      const roles = visitSlots(input.state, constraints, input.existingItinerary?.days[index], input.replacePlaceId, input.startHour)
+        .filter(s => missing.includes(s.label) && ["coffee", "culture"].includes(s.intent));
+      if (!roles.length) continue;
+      const extra = await Promise.all(roles.slice(0, 2).map(slot => loadVenuePool(manifest, input.state, {
+        intent: slot.intent, constraints, center: pool.area.identity.center, radiusM: 1600, area: pool.area.identity,
+        excludeIds: [...input.excludeIds, ...(input.replacePlaceId ? [input.replacePlaceId] : [])], deferHours: true,
+      })));
+      pool.radiusM = 1600; expanded = true;
+      for (const batch of extra) { pool.venues.push(...batch.venues); evidence.push(...batch.evidence); }
+      recoveryLog.push({ reason: "Checked caf\u00e9s and culture stops within 1.6 km of the center to complete the walk.", action: "wider_radius", affectedGoalIds: ["build_visit"], changedStopIds: [] });
+    }
+    if (expanded) result = scheduleVisit(input, pools, constraints, date, fixed);
+  }
   if (input.replacePlaceId) recoveryLog.unshift({ reason: "You asked to replace this stop while keeping the other verified stops.", action: "alternate_venue", affectedGoalIds: ["build_visit"], changedStopIds: [input.replacePlaceId] });
   if (result.audit.unmet.length) recoveryLog.push({ reason: "Some stops could not be filled without breaking your requirements.", action: "fewer_stops", affectedGoalIds: [...new Set(result.audit.unmet.map(u => u.goalId))], changedStopIds: [] });
   result.recoveryLog = recoveryLog; result.evidenceIds = uniqueEvidence(evidence).map(e => e.id);
   result.audit = auditVisit(result, input);
   if (result.audit.hardViolations.length) throw apiError("qloo_unavailable", "The visit could not pass its final constraints check. No unsafe replacement was returned.", true);
-  const response: PlanResponseV2 = { ...result, meta: resultMeta(input, manifest, { method: VISIT_METHOD, partial: result.audit.unmet.length > 0, suffix: [input.areaIds, date.toISOString(), input.startHour, input.state.days, input.state.pace, input.includeIds, input.excludeIds, input.replacePlaceId, hash(input.existingItinerary ?? null)], dataAsOf: evidence.map(e => e.fetchedAt).sort()[0] }), evidence: uniqueEvidence(evidence) };
+  const response: PlanResponseV2 = { ...result, meta: resultMeta(input, manifest, { method: VISIT_METHOD, partial: result.audit.unmet.length > 0 || result.itinerary.days.some(d => d.missing.length > 0), suffix: [input.allowContextExpansion, input.areaIds, date.toISOString(), input.startHour, input.state.days, input.state.pace, input.includeIds, input.excludeIds, input.replacePlaceId, hash(input.existingItinerary ?? null)], dataAsOf: evidence.map(e => e.fetchedAt).sort()[0] }), evidence: uniqueEvidence(evidence) };
   savedVisits.set(response.meta.analysisId, structuredClone(response));
   if (savedVisits.size > 100) savedVisits.delete(savedVisits.keys().next().value!);
   return response;

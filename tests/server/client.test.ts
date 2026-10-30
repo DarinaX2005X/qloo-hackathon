@@ -98,7 +98,7 @@ describe("Qloo client", () => {
     expect(JSON.stringify(one)).not.toContain("Long");
     await qlooGet("/search", { query: "x", take: 6 });
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "GET", next: { revalidate: 604800 }, headers: { "X-Api-Key": "synthetic-test-key" } });
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ method: "GET", cache: "no-store", headers: { "X-Api-Key": "synthetic-test-key" } });
     await expect(qlooGet("/v2/insights", { take: 50 })).rejects.toMatchObject({ error: { code: "bad_input" } });
     await expect(qlooGet("/search", { take: 51 })).rejects.toMatchObject({ error: { code: "bad_input" } });
   });
@@ -185,12 +185,46 @@ describe("Qloo client", () => {
     await expect(qlooGet("/search", {})).rejects.toMatchObject({ error: { code: "qloo_unavailable" } });
   });
 
-  it("aborts a stalled request after nine seconds", async () => {
-    const original = AbortSignal.timeout;
-    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => { expect(ms).toBe(9000); return original(5); });
-    vi.stubGlobal("fetch", vi.fn((_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)))));
-    await expect(qlooGet("/search", {})).rejects.toMatchObject({ error: { code: "qloo_unavailable" } });
-    timeout.mockRestore();
+  it.each(["fetch", "body", "cancel"])("recovers all slots and coalesced entries when %s ignores abort", async stage => {
+    vi.useFakeTimers();
+    const never = () => new Promise(() => {});
+    const fetcher = vi.fn().mockImplementation(stage === "fetch" ? never : async () =>
+      stage === "body" ? { ok: true, status: 200, json: never } : { ok: false, status: 503, body: { cancel: never } });
+    vi.stubGlobal("fetch", fetcher);
+    const jobs = Array.from({ length: 4 }, (_, i) => qlooGet("/search", { query: `stalled-${i}` }));
+    jobs.push(qlooGet("/search", { query: "stalled-0" }));
+    const outcomes = Promise.allSettled(jobs);
+    const queued = Promise.allSettled([qlooGet("/search", { query: "queued-expiry" })]);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(await queued).toMatchObject([{ status: "rejected", reason: { error: { code: "qloo_unavailable" } } }]);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect((await outcomes).every(r => r.status === "rejected")).toBe(true);
+    expect(fetcher.mock.calls.every(([, init]) => init.signal.aborted)).toBe(true);
+    fetcher.mockImplementation(async () => Response.json({ results: [] }));
+    await Promise.all(Array.from({ length: 4 }, (_, i) => qlooGet("/search", { query: `stalled-${i}` })));
+    await qlooGet("/search", { query: "queued-expiry" });
+    expect(fetcher).toHaveBeenCalledTimes(9);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds the shared task across retries and never caches a late response", async () => {
+    vi.useFakeTimers();
+    let late!: (value: unknown) => void;
+    const fetcher = vi.fn().mockImplementationOnce(async () => {
+      await new Promise(resolve => setTimeout(resolve, 9500));
+      return new Response("", { status: 503 });
+    }).mockImplementationOnce(async () => ({ ok: true, status: 200, json: () => new Promise(resolve => { late = resolve; }) }));
+    vi.stubGlobal("fetch", fetcher);
+    const outcomes = Promise.allSettled([qlooGet("/search", { query: "total-bound" }), qlooGet("/search", { query: "total-bound" })]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect((await outcomes).every(r => r.status === "rejected")).toBe(true);
+    fetcher.mockImplementation(async () => Response.json({ results: [{ name: "Fresh" }] }));
+    expect(await qlooGet("/search", { query: "total-bound" })).toEqual({ results: [{ name: "Fresh" }] });
+    late({ results: [{ name: "Stale" }] });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await qlooGet("/search", { query: "total-bound" })).toEqual({ results: [{ name: "Fresh" }] });
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("expires cache entries after seven days and evicts the least recently used beyond 500", async () => {

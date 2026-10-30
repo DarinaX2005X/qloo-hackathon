@@ -11,8 +11,8 @@ type QlooRuntime = {
   queue: (() => void)[];
   generation?: number;
 };
-const processGlobal = globalThis as typeof globalThis & { __homingQlooRuntime?: QlooRuntime };
-const runtime: QlooRuntime = processGlobal.__homingQlooRuntime ??= { cache: new Map(), pending: new Map(), active: 0, queue: [] };
+const processGlobal = globalThis as typeof globalThis & { __homingQlooRuntimeV10?: QlooRuntime };
+const runtime: QlooRuntime = processGlobal.__homingQlooRuntimeV10 ??= { cache: new Map(), pending: new Map(), active: 0, queue: [] };
 const { cache, pending } = runtime;
 const TTL = 604800;
 const PARSER_VERSION = "stage09-native-ranks-explainability-v1";
@@ -71,42 +71,83 @@ export function qlooCacheGeneration(): number {
   return runtime.generation ?? 0;
 }
 
-export async function acquireQlooSlot(): Promise<void> {
+const unavailable = () => apiError("qloo_unavailable", "Qloo is unavailable or the request timed out.", true);
+
+/** Abort is advisory to fetch; this race also bounds transports that ignore it. */
+async function bounded<T>(operation: (signal: AbortSignal) => Promise<T>, ms: number, parent?: AbortSignal): Promise<T> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timer = setTimeout(abort, ms);
+  parent?.addEventListener("abort", abort, { once: true });
+  if (parent?.aborted) abort();
+  let rejectAbort!: () => void;
+  const deadline = new Promise<never>((_, reject) => {
+    rejectAbort = () => reject(unavailable());
+    controller.signal.addEventListener("abort", rejectAbort, { once: true });
+  });
+  try {
+    if (controller.signal.aborted) throw unavailable();
+    return await Promise.race([operation(controller.signal), deadline]);
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener("abort", abort);
+    controller.signal.removeEventListener("abort", rejectAbort);
+    controller.abort();
+  }
+}
+
+export async function acquireQlooSlot(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw unavailable();
   if (runtime.active < 4) { runtime.active++; return; }
-  await new Promise<void>((resolve) => { runtime.queue.push(resolve); });
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", cancel); };
+    const grant = () => { cleanup(); resolve(); };
+    const cancel = () => {
+      const index = runtime.queue.indexOf(grant);
+      if (index < 0) return; // A granted slot belongs to the caller's finally.
+      runtime.queue.splice(index, 1);
+      cleanup(); reject(unavailable());
+    };
+    const timer = setTimeout(cancel, 8000);
+    runtime.queue.push(grant);
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
 }
 
 export function releaseQlooSlot(): void {
   const next = runtime.queue.shift();
-  if (next) next(); // Transfer the occupied slot to the oldest waiter.
+  if (next) next(); // Transfer the occupied slot to the oldest live waiter.
   else runtime.active--;
 }
 
-export async function fetchQlooAttempt(url: URL, apiKey: string): Promise<{ status: number; value?: unknown }> {
-  await acquireQlooSlot();
+export async function fetchQlooAttempt(url: URL, apiKey: string, signal?: AbortSignal): Promise<{ status: number; value?: unknown }> {
+  await acquireQlooSlot(signal);
   try {
-    const response = await fetch(url, {
-      method: "GET", headers: { "X-Api-Key": apiKey },
-      signal: AbortSignal.timeout(9000), next: { revalidate: TTL },
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      return { status: response.status };
-    }
-    const value: unknown = await response.json();
-    if (!record(value).results || record(value).success === false)
-      throw apiError("qloo_unavailable", "Qloo returned an unexpected response.", true);
-    return { status: response.status, value: trimResponse(value) };
+    return await bounded(async attemptSignal => {
+      const response = await fetch(url, {
+        method: "GET", headers: { "X-Api-Key": apiKey },
+        signal: attemptSignal, cache: "no-store",
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return { status: response.status };
+      }
+      const value: unknown = await response.json();
+      if (!record(value).results || record(value).success === false)
+        throw apiError("qloo_unavailable", "Qloo returned an unexpected response.", true);
+      return { status: response.status, value: trimResponse(value) };
+    }, 10_000, signal);
   } finally { releaseQlooSlot(); }
 }
 
-export async function fetchQloo(url: URL, apiKey: string): Promise<unknown> {
+export async function fetchQloo(url: URL, apiKey: string, signal?: AbortSignal): Promise<unknown> {
   let quotaRetries = 0;
   let serverRetries = 0;
   let networkRetries = 0;
   while (true) {
+    if (signal?.aborted) throw unavailable();
     try {
-      const response = await fetchQlooAttempt(url, apiKey);
+      const response = await fetchQlooAttempt(url, apiKey, signal);
       if (response.status === 429 && quotaRetries < 2) {
         const delay = [700, 1500][quotaRetries++] + Math.floor(Math.random() * 201);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -160,7 +201,7 @@ export async function qlooGet(path: string, params: QlooParams): Promise<unknown
   consumeQlooCall();
   let task = pending.get(key);
   if (!task) {
-    task = withoutQlooBudget(() => fetchQloo(url, apiKey).then((value) => {
+    task = withoutQlooBudget(() => bounded(signal => fetchQloo(url, apiKey, signal), 20_000).then((value) => {
       cache.set(key, { value, expires: Date.now() + TTL * 1000, fetchedAt: new Date().toISOString() });
       if (cache.size > 500) cache.delete(cache.keys().next().value!);
       return value;

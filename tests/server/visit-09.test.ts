@@ -97,7 +97,8 @@ describe("strict neighborhood visit", () => {
     expect(first.itinerary.days[0].missing).toContain("Explore the neighborhood");
     const swap = scheduleVisit(input({ existingItinerary: first.itinerary, replacePlaceId: "c", excludeIds: ["c"] }), [{ area, radiusM: 650, venues: [venue("c2", "coffee"), venue("f", "food")] }], [], date, [venue("f", "food")]);
     expect(swap.itinerary.days[0].missing).toContain("Explore the neighborhood");
-    expect(swap.audit.unmet).not.toEqual([]);
+    expect(swap.audit.unmet).toEqual([]);
+    expect(swap.audit.warnings.some(w => w.includes("unfilled stop"))).toBe(true);
   });
   it("carries previous-day overnight hours and rejects tomorrow's early closing for today", () => {
     const p = venue("night", "dance", { hours: { friday: [{ opens: "22:00", closes: "03:00" }], saturday: [{ opens: "22:00", closes: "04:00" }] } }).place;
@@ -117,13 +118,36 @@ describe("strict neighborhood visit", () => {
     const ids = result.itinerary.days.flatMap(d => d.stops.map(s => s.place.id));
     expect(new Set(ids).size).toBe(ids.length);
     expect(result.itinerary.days[2].stops).toEqual([]);
-    expect(result.audit.unmet.some(u => u.goalId.startsWith("visit:day3"))).toBe(true);
+    expect(result.itinerary.days[2].missing.length).toBeGreaterThan(0);
+    expect(result.audit.warnings.length).toBeGreaterThan(0);
   });
   it("keeps unknown hours visible and never labels event venues open from ordinary hours", () => {
     const constraints = [constraint("intent", "dance")];
     const result = scheduleVisit(input({ constraints }), [{ area, radiusM: 650, venues: [venue("c", "coffee"), venue("b", "culture"), venue("f", "food"), venue("d", "dance")] }], constraints, date);
     expect(result.venueEvidence.d.hoursStatus).toBe("event_required");
     expect(result.itinerary.days[0].stops.at(-1)?.hoursNote).toBe("hours not listed");
+  });
+  it("allows a disclosed 1.6 km context only without user rules and audits the actual coordinates", () => {
+    const outer = venue("outer", "culture", { lon: .01 });
+    const tooFar = venue("far", "culture", { lon: .03 });
+    const pool = { area, radiusM: 1600, venues: [venue("c", "coffee"), outer, tooFar, venue("f", "food")] };
+    const result = scheduleVisit(input(), [pool], [], date);
+    expect(result.itinerary.days[0].stops.map(s => s.place.id)).toEqual(["c", "outer", "f"]);
+    expect(result.venueEvidence.outer.insideArea).toBe(false);
+    expect(result.itinerary.days[0].note).toContain("1.6 km");
+    expect(auditVisit(result, input()).hardViolations).toEqual([]);
+    expect(auditVisit(result, input({ allowContextExpansion: false })).hardViolations.length).toBeGreaterThan(0);
+    const constraints = [constraint("exclude_type", "bars")];
+    expect(scheduleVisit(input({ constraints }), [pool], constraints, date).itinerary.days[0].stops.map(s => s.place.id)).not.toContain("outer");
+    expect(auditVisit(result, input({ constraints })).hardViolations.length).toBeGreaterThan(0);
+    const tampered = structuredClone(result); tampered.itinerary.days[0].stops[1].place.lon = .03; tampered.venueEvidence.outer.place.lon = .03;
+    expect(auditVisit(tampered, input()).hardViolations.some(v => v.reason.includes("outside"))).toBe(true);
+  });
+  it("keeps user-rule gaps as unmet, and data gaps as warnings", () => {
+    const constraints = [constraint("exclude_type", "museums")];
+    const pool = { area, radiusM: 650, venues: [venue("c", "coffee"), venue("f", "food")] };
+    expect(scheduleVisit(input(), [pool], [], date).audit.unmet).toEqual([]);
+    expect(scheduleVisit(input({ constraints }), [pool], constraints, date).audit.unmet[0].reason).toContain("fits your rules");
   });
   it("rejects impossible and past dates instead of normalizing them", () => {
     expect(() => visitDate("2026-02-30", new Date("2026-02-01"))).toThrow();

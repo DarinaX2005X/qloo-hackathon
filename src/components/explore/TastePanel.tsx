@@ -25,9 +25,9 @@ function Chips({ who }: { who: "you" | "them" }) {
   const ex = useExplore();
   const loves = who === "you" ? ex.state.loves : ex.state.companion?.loves ?? [];
   const noGeo = new Set(ex.field.data?.signalsWithoutGeo ?? []);
-  const pending = Object.keys(ex.pending)
-    .filter((k) => k.startsWith(`${who}:`))
-    .map((k) => k.slice(who.length + 1));
+  const pending = Object.entries(ex.pending)
+    .filter(([k]) => k.startsWith(`${who}:`))
+    .map(([k, v]) => ({ ...v, q: v.query || k.slice(who.length + 1) }));
   return (
     <div className="flex flex-wrap gap-1.5">
       <AnimatePresence initial={false}>
@@ -43,8 +43,14 @@ function Chips({ who }: { who: "you" | "them" }) {
             onOpen={() => ex.loadCandidates(who, l.query)}
           />
         ))}
-        {pending.map((q) => (
-          <PendingChip key={`p-${q}`} query={q} />
+        {pending.map((p) => (
+          <PendingChip
+            key={`p-${p.q}`}
+            query={p.q}
+            failed={p.status === "failed" ? p.message ?? "The taste search failed." : null}
+            onRemove={() => ex.removePending(p.q, who)}
+            onRetry={() => void ex.addLove(p.q, who)}
+          />
         ))}
       </AnimatePresence>
     </div>
@@ -195,7 +201,7 @@ export function TastePanel({ compact = false, onDone, footer }: { compact?: bool
               onAdd={(q) => ex.addLove(q, "you")}
               onImage={(img) => readImage(img, "you")}
               reading={reading === "you"}
-              placeholder={ex.state.loves.length ? "Add another" : "Radiohead, Fleabag, natural wine"}
+              placeholder={ex.state.loves.length ? "Add another" : "An artist, film, book or place"}
               autoFocus={empty && !compact}
             />
           </div>

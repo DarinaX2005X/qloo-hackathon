@@ -7,6 +7,7 @@ import type { AblationV2, AreaDecision, Claim, HomeMatchV2, SourceSignatureSumma
 import { AreaRank, HomeOverlap, SupportTag } from "@/components/ui/Metric";
 import { OVERLAP_EXPLAINER, overlapText } from "@/lib/honest";
 import { cityName } from "@/components/ui/CityPicker";
+import { Button } from "@/components/ui/primitives";
 import { ROLE_PLURAL, SourcePlaceChip, VenueRow, areaName, areaScale, bestConnection, connectionLine, useLoveName } from "./venue";
 import type { AddressView, ComparisonView, ExplainView, HomeView } from "./features";
 import { counterfactual, moveText } from "./ablation";
@@ -223,6 +224,7 @@ export function HomeMatchesCard({
   onPick,
   actions,
   onBlend,
+  onAddLoves,
 }: {
   view: HomeView;
   compact?: boolean;
@@ -231,6 +233,8 @@ export function HomeMatchesCard({
   actions?: AreaActions;
   /** offered when the closest area is a weak match and the person has loves to mix in */
   onBlend?: () => void;
+  /** offered instead when there are no loves to mix in yet */
+  onAddLoves?: () => void;
 }) {
   const src = view.sourceSignatureSummary;
   const ms = view.matches;
@@ -289,11 +293,25 @@ export function HomeMatchesCard({
       {weak && (
         <div data-testid="home-weak" className="mb-2.5 rounded-[14px] bg-paper-sunk/80 px-3.5 py-2.5 text-[13px] leading-snug text-ink-2">
           Even the closest area here is a weak match for {srcName}, so treat these as places to start looking.
-          {onBlend && (
-            <button onClick={onBlend} className="mt-1 block min-h-8 font-[600] text-you-deep hover:underline">
-              Mix in what you love
-            </button>
-          )}
+          {onBlend ? (
+            <>
+              {" "}Your own loves can sharpen the order.
+              <span className="mt-2 block">
+                <Button data-testid="home-weak-blend" variant="primary" size="sm" onClick={onBlend}>
+                  Mix in what you love
+                </Button>
+              </span>
+            </>
+          ) : onAddLoves ? (
+            <>
+              {" "}Add a few things you love, then mix them in here.
+              <span className="mt-2 block">
+                <Button data-testid="home-weak-add" variant="primary" size="sm" onClick={onAddLoves}>
+                  Add what you love
+                </Button>
+              </span>
+            </>
+          ) : null}
         </div>
       )}
       <ol className="space-y-2.5">
@@ -375,6 +393,11 @@ export function AddressCard({
         >
           {p.text}
         </p>
+        {p.warn && (
+          <p data-testid="spot-house-unchecked" className="mt-1.5 text-[13px] font-[560] leading-snug text-ink">
+            The house itself was not checked. Everything below is about the streets around this point.
+          </p>
+        )}
         {a ? (
           <div className="mt-3.5">
             <p className="text-[12.5px] font-[560] text-ink-3">In the area</p>

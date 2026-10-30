@@ -13,7 +13,7 @@ export const MANIFEST_SCHEMA = "central-7500m-neutral-circles-context-v4";
 export const CACHE_TTL = 30 * 60_000;
 export const DAY_TTL = 24 * 60 * 60_000;
 export const ELIGIBILITY_VERSION = "primary-club-and-culture-roles-v10";
-export const AREA_CARD_VERSION = "exclusive-venue-sentence-proof-v6";
+export const AREA_CARD_VERSION = "exclusive-venue-plain-proof-v7";
 export const normalized = (text: string) => text.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 export const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
 export function effectiveConstraints(state: ExploreState, constraints: Constraint[]): Constraint[] {
@@ -26,8 +26,8 @@ export function profileHash(state: ExploreState, constraints: Constraint[] = [])
     state.refinements.map(t => t.id).sort(), state.discovery, state.budget, constraints.map(c => [c.id, c.kind, c.value, c.strength]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
 }
 type CacheEntry<T> = { expires: number; promise: Promise<T> };
-const processGlobal = globalThis as typeof globalThis & { __homingDerived09?: Map<string, Map<string, CacheEntry<unknown>>> };
-const sharedCaches = processGlobal.__homingDerived09 ??= new Map();
+const processGlobal = globalThis as typeof globalThis & { __homingDerived10?: Map<string, Map<string, CacheEntry<unknown>>> };
+const sharedCaches = processGlobal.__homingDerived10 ??= new Map();
 /** Request-independent work is shared; failures are evicted rather than cached as empty data. */
 export class DerivedCache<T> {
   private entries: Map<string, CacheEntry<T>>;

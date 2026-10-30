@@ -207,19 +207,54 @@ export function LoveChip({
   );
 }
 
-export function PendingChip({ query }: { query: string }) {
+/** A love still being looked up. It can always be removed; after the search deadline it turns into
+ *  "Couldn't check" with Retry, keeping the text the person typed. */
+export function PendingChip({ query, failed, onRemove, onRetry }: { query: string; failed?: string | null; onRemove?: () => void; onRetry?: () => void }) {
   return (
     <motion.div
       layout
+      data-testid="pending-love"
+      data-state={failed ? "failed" : "searching"}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
-      className="flex h-11 items-center gap-2 rounded-[12px] bg-paper-sunk px-3 text-[14px] text-ink-2"
+      className={`flex min-h-11 max-w-full items-center gap-2 rounded-[12px] py-1 pl-3 pr-1 text-[14px] ${failed ? "bg-paper-raised text-ink ring-1 ring-[color-mix(in_oklch,var(--warn)_60%,transparent)]" : "bg-paper-sunk text-ink-2"}`}
     >
-      <Spinner size={14} className="text-ink-3" />
-      {query}
+      {!failed && <Spinner size={14} className="shrink-0 text-ink-3" />}
+      <span className="min-w-0">
+        <span className="block truncate font-[560] leading-tight">{query}</span>
+        <span className="block text-[12px] leading-tight text-ink-3">{failed ? "Couldn't check it" : "Looking it up"}</span>
+      </span>
+      {failed && onRetry && (
+        <button onClick={onRetry} title={failed} className="h-8 shrink-0 rounded-[8px] px-2 text-[13px] font-[600] text-you-deep hover:bg-paper-sunk">
+          Retry
+        </button>
+      )}
+      {onRemove && (
+        <button
+          onClick={onRemove}
+          aria-label={`Remove ${query}`}
+          title="Remove"
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-ink-3 hover:bg-paper-raised hover:text-ink"
+        >
+          <X size={14} />
+        </button>
+      )}
     </motion.div>
   );
+}
+
+/** Split what was typed or pasted into separate loves: one per line, comma or semicolon. */
+export function splitLoves(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of text.split(/[,;\n]/)) {
+    const s = part.trim().slice(0, 120);
+    if (!s || seen.has(s.toLowerCase())) continue;
+    seen.add(s.toLowerCase());
+    out.push(s);
+  }
+  return out;
 }
 
 /** Text input that turns each entry into a chip. Paste or drop an image to read a screenshot. */
@@ -251,13 +286,17 @@ export function LoveInput({
     r.onload = () => onImage(String(r.result));
     r.readAsDataURL(f);
   };
+  const [split, setSplit] = useState<string[] | null>(null);
   const submit = () => {
-    const parts = text.split(/,|\n/).map((s) => s.trim().slice(0, 120)).filter(Boolean);
-    parts.slice(0, LIMITS.loves - count).forEach(onAdd);
+    const parts = splitLoves(text).slice(0, LIMITS.loves - count);
+    parts.forEach(onAdd);
+    // several names in one line become separate loves; say so, in case it was one name with a comma
+    setSplit(parts.length > 1 ? parts : null);
     setText("");
   };
 
   return (
+    <div>
     <div
       onDragOver={(e) => (e.preventDefault(), setDrag(true))}
       onDragLeave={() => setDrag(false)}
@@ -275,7 +314,10 @@ export function LoveInput({
         disabled={full}
         autoFocus={autoFocus}
         maxLength={600}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          if (split) setSplit(null);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.preventDefault(), submit());
         }}
@@ -298,6 +340,14 @@ export function LoveInput({
         {reading ? <Spinner size={16} /> : <ImagePlus size={18} strokeWidth={1.75} />}
       </button>
       <input ref={file} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(e) => (readFile(e.target.files?.[0]), (e.target.value = ""))} />
+    </div>
+      {split ? (
+        <p data-testid="love-split-note" className="mt-1.5 px-1 text-[12.5px] leading-snug text-ink-2">
+          Added as {split.length} separate loves: {split.join(", ")}. If that was one name, remove them and type it without commas.
+        </p>
+      ) : (
+        !full && <p className="mt-1.5 px-1 text-[12px] leading-snug text-ink-3">One at a time works best: type a name and press Enter, then the next.</p>
+      )}
     </div>
   );
 }

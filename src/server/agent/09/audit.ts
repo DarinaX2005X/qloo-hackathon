@@ -33,7 +33,7 @@ export function auditExecution(result: Execution, constraints: Constraint[], goa
     }
     case "compare_cities": {
       unmet.push(...result.data.results.filter(c => c.status !== "ok").map(c => `${c.cityName}: ${c.error?.message ?? "The comparison has limited supporting data."}`));
-      observation = result.data.results.map(c => `${c.cityName}: ${c.culturalOverlap === null ? "overlap unavailable" : `${c.culturalOverlap.toFixed(1)}/100 cultural overlap`}`).join("; ") + (result.data.recommendation ? "." : ". These results do not establish a clear city recommendation.");
+      observation = result.data.method === "personal_area_rank_v1" ? result.data.results.map(c => `${c.cityName}: ${c.areas[0] ? `${c.areas[0].area.name} is the first area to explore` : c.error?.message ?? "no area could be checked"}`).join("; ") + ". Each area is ranked within its own city." : result.data.results.map(c => `${c.cityName}: ${c.culturalOverlap === null ? "overlap unavailable" : `${c.culturalOverlap.toFixed(1)}/100 cultural overlap`}`).join("; ") + (result.data.recommendation ? "." : ". These results do not establish a clear city recommendation.");
       break;
     }
     case "evaluate_address": {
@@ -82,7 +82,10 @@ export function claimsForCard(card: AgentCardV2, evidenceIds: string[]): Claim[]
     }
     case "address": return [make(`${card.result.label} was checked at ${card.result.geocodeQuality} precision.${card.result.area ? ` Its surrounding comparison area is ${card.result.area.area.name}.` : " It is outside the named areas in this comparison."}${card.result.outsideSelectedArea ? " It lies outside your selected area." : ""}`)];
     case "venues": return card.venues.length ? [make(`Places to consider: ${card.venues.slice(0, 3).map(v => v.place.name).join(", ")}.${card.venues.some(v => v.hoursStatus === "event_required") ? " Check each venue's event schedule and admission; no particular event is confirmed." : " Check current opening hours before visiting."}`)] : [];
-    case "comparison": return [make(card.result.results.map(c => `${c.cityName}: ${c.culturalOverlap === null ? "cultural overlap unavailable" : `${c.culturalOverlap.toFixed(1)}/100 cultural-profile overlap`}`).join("; ") + (card.result.recommendation ? "." : ". This comparison does not identify a clear winner."))];
+    case "comparison": if (card.result.method === "personal_area_rank_v1") return card.result.results.map(c => make(c.areas[0]
+      ? `${c.cityName}: start with ${c.areas[0].area.name}, #${c.areas[0].metrics.rank} of ${c.areas[0].metrics.candidateCount} areas checked. ${c.areas[0].headline}`
+      : `${c.cityName}: ${c.error?.message ?? "No area could be checked."}`, c.evidenceIds));
+      return [make(card.result.results.map(c => `${c.cityName}: ${c.culturalOverlap === null ? "cultural overlap unavailable" : `${c.culturalOverlap.toFixed(1)}/100 cultural-profile overlap`}`).join("; ") + (card.result.recommendation ? "." : ". This comparison does not identify a clear winner."))];
     case "explanation": return card.claims;
     case "visit": {
       const n = card.result.itinerary.days.reduce((s, d) => s + d.stops.length, 0);

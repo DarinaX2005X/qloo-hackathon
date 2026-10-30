@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "motion/react";
@@ -12,12 +12,14 @@ import { toShortlist, type ShortlistArea } from "@/components/map/areas";
 import { CityPicker, cityName } from "@/components/ui/CityPicker";
 import { Button, Segmented, Spinner } from "@/components/ui/primitives";
 import { LogoMark } from "@/components/brand/Logo";
-import { DOMAIN_NAME } from "@/components/explore/LoveChips";
+import { DOMAIN_NAME, splitLoves } from "@/components/explore/LoveChips";
+import { api, SEARCH_TIMEOUT_MS } from "@/components/explore/api";
+import { pickEntity } from "@/lib/pick";
 import { emptyState, encodeState } from "@/lib/state";
 import { resolveNames } from "./useLiveField";
 import { useLanding } from "./LandingData";
 import { MapPreview } from "./MapPreview";
-import { LANDING } from "./scenes";
+import { LANDING, landingName } from "./scenes";
 
 type Mode = "loves" | "home";
 
@@ -36,14 +38,26 @@ const dateText = (iso?: string) => {
 };
 
 /** Chips for the loves typed on the landing. A name that matched nothing, or several things, says so instead of guessing. */
-function LoveChipsInput({ loves, pending, onRemove, onAdd, onChoose }: {
+type HeroPending = { q: string; failed?: string };
+
+function LoveChipsInput({ loves, pending, onRemove, onAdd, onChoose, onRetry, onDropPending }: {
   loves: ResolvedLove[];
-  pending: string[];
+  pending: HeroPending[];
   onRemove: (q: string) => void;
   onAdd: (q: string) => void;
   onChoose: (q: string, id: string) => void;
+  onRetry: (q: string) => void;
+  onDropPending: (q: string) => void;
 }) {
   const [text, setText] = useState("");
+  const [split, setSplit] = useState<string[] | null>(null);
+  // "Björk, Spirited Away, Muji" pasted in one go becomes three loves, and the note says so
+  const commit = (raw: string) => {
+    const parts = splitLoves(raw);
+    parts.forEach(onAdd);
+    setSplit(parts.length > 1 ? parts : null);
+    setText("");
+  };
   const unclear = loves.filter((l) => !l.chosen && l.candidates.length >= 2);
   return (
     <div>
@@ -76,33 +90,58 @@ function LoveChipsInput({ loves, pending, onRemove, onAdd, onChoose }: {
             </motion.span>
           ))}
           {pending.map((p) => (
-            <motion.span key={`p${p}`} className="flex h-10 items-center gap-2 rounded-[11px] bg-paper-sunk px-3 text-[14px] text-ink-3">
-              <Spinner size={13} /> {p}
+            <motion.span
+              key={`p${p.q}`}
+              data-testid="hero-pending"
+              data-state={p.failed ? "failed" : "searching"}
+              className={`flex h-10 max-w-full items-center gap-1.5 rounded-[11px] pl-3 pr-1 text-[14px] ${p.failed ? "bg-paper-sunk text-ink ring-1 ring-[color-mix(in_oklch,var(--warn)_60%,transparent)]" : "bg-paper-sunk text-ink-3"}`}
+            >
+              {!p.failed && <Spinner size={13} />}
+              <span className="truncate">{p.q}</span>
+              {p.failed && <span className="shrink-0 text-[12px] font-[450] text-ink-3">Couldn&apos;t check</span>}
+              {p.failed && (
+                <button onClick={() => onRetry(p.q)} title={p.failed} className="h-8 shrink-0 rounded-[8px] px-2 text-[13px] font-[600] text-you-deep hover:bg-paper-raised">
+                  Retry
+                </button>
+              )}
+              <button
+                aria-label={`Remove ${p.q}`}
+                onClick={() => onDropPending(p.q)}
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-ink-3 hover:bg-paper-raised hover:text-ink"
+              >
+                <X size={14} />
+              </button>
             </motion.span>
           ))}
         </AnimatePresence>
         <input
           data-testid="hero-love-input"
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            if (split) setSplit(null);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === ",") {
               e.preventDefault();
-              onAdd(text);
-              setText("");
+              commit(text);
             } else if (e.key === "Backspace" && !text && loves.length) onRemove(loves[loves.length - 1].query);
           }}
           onBlur={() => {
-            if (text.trim()) {
-              onAdd(text);
-              setText("");
-            }
+            if (text.trim()) commit(text);
           }}
           placeholder={loves.length ? "Add another" : "An artist, a show, a book, a brand"}
           aria-label="Add something you love"
           className="h-10 min-w-[150px] flex-1 bg-transparent px-2 text-[15.5px] outline-none placeholder:text-ink-3"
         />
       </div>
+      {split ? (
+        <p data-testid="hero-split-note" className="mt-1.5 px-2 text-[12.5px] leading-snug text-ink-2">
+          Added as {split.length} separate loves: {split.join(", ")}. If that was one name, remove them and type it without commas.
+        </p>
+      ) : (
+        <p className="mt-1 px-2 text-[12px] leading-snug text-ink-3">One at a time: type a name and press Enter, then the next.</p>
+      )}
       {unclear.map((l) => (
         <div key={l.query} className="mt-2 rounded-[12px] bg-paper-sunk/70 p-2">
           <p className="mb-1.5 px-1 text-[13px] text-ink-2">
@@ -179,7 +218,8 @@ export function Hero() {
   const [city, setCity] = useState(LANDING.hero.city);
   const [loves, setLoves] = useState<ResolvedLove[]>([]);
   const [edited, setEdited] = useState(false);
-  const [pending, setPending] = useState<string[]>([]);
+  const [pending, setPending] = useState<HeroPending[]>([]);
+  const lookups = useRef(new Map<string, AbortController>());
   const [oldCity, setOldCity] = useState("Berlin");
   const [oldHood, setOldHood] = useState("");
 
@@ -190,14 +230,45 @@ export function Hero() {
     else void resolveNames(LANDING.hero.loves).then((r) => setLoves(r.filter((l) => l.chosen)));
   }, [settled, scene, edited]);
 
-  const add = async (q: string) => {
+  /** Look one name up. The search has a deadline; a failed one stays as a chip with Retry and Remove, never blocking "Find my areas". */
+  const lookup = async (v: string) => {
+    const key = v.toLowerCase();
+    lookups.current.get(key)?.abort();
+    const ac = new AbortController();
+    lookups.current.set(key, ac);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort();
+    }, SEARCH_TIMEOUT_MS);
+    setPending((p) => [...p.filter((x) => x.q.toLowerCase() !== key), { q: v }]);
+    try {
+      const r = await api.search(v, undefined, ac.signal);
+      if (lookups.current.get(key) !== ac) return;
+      setPending((p) => p.filter((x) => x.q.toLowerCase() !== key));
+      const l: ResolvedLove = { query: v, chosen: landingName(v, pickEntity(v, r)), candidates: r, weight: 1 };
+      setLoves((cur) => (cur.some((x) => x.query.toLowerCase() === key) ? cur : [...cur, l]));
+    } catch (e) {
+      if (lookups.current.get(key) !== ac) return;
+      const why = timedOut ? `No answer from the taste search in ${SEARCH_TIMEOUT_MS / 1000} s.` : (e as Error).message || "The taste search failed.";
+      setPending((p) => p.map((x) => (x.q.toLowerCase() === key ? { q: v, failed: why } : x)));
+    } finally {
+      clearTimeout(timer);
+      if (lookups.current.get(key) === ac) lookups.current.delete(key);
+    }
+  };
+  const add = (q: string) => {
     const v = q.trim().slice(0, 120);
-    if (!v || loves.length >= LIMITS.loves || loves.some((l) => l.query.toLowerCase() === v.toLowerCase())) return;
+    const key = v.toLowerCase();
+    if (!v || loves.length + pending.length >= LIMITS.loves || loves.some((l) => l.query.toLowerCase() === key) || pending.some((p) => p.q.toLowerCase() === key)) return;
     setEdited(true);
-    setPending((p) => [...p, v]);
-    const [l] = await resolveNames([v]);
-    setPending((p) => p.filter((x) => x !== v));
-    setLoves((cur) => [...cur, l]);
+    void lookup(v);
+  };
+  const dropPending = (q: string) => {
+    const key = q.toLowerCase();
+    lookups.current.get(key)?.abort();
+    lookups.current.delete(key);
+    setPending((p) => p.filter((x) => x.q.toLowerCase() !== key));
   };
   const remove = (q: string) => {
     setEdited(true);
@@ -208,7 +279,7 @@ export function Hero() {
   const chosen = loves.filter((l) => l.chosen);
   const changedCity = city !== LANDING.hero.city;
   const go = () => {
-    const s = { ...emptyState(city), loves: chosen };
+    const s = { ...emptyState(city), loves: chosen.slice(0, LIMITS.loves) };
     router.push(`/explore?s=${encodeState(s)}`);
   };
   const goHome = () => {
@@ -273,7 +344,7 @@ export function Hero() {
             />
             <div className="p-1 pt-3">
               {mode === "loves" ? (
-                <LoveChipsInput loves={loves} pending={pending} onRemove={remove} onAdd={(q) => void add(q)} onChoose={choose} />
+                <LoveChipsInput loves={loves} pending={pending} onRemove={remove} onAdd={add} onChoose={choose} onRetry={(q) => void lookup(q)} onDropPending={dropPending} />
               ) : (
                 <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] gap-2" data-testid="hero-home">
                   <label className="block">
@@ -318,7 +389,7 @@ export function Hero() {
                 <CityPicker variant="hero" value={city} onChange={setCity} />
               </label>
               {mode === "loves" ? (
-                <Button variant="primary" size="lg" className="w-full sm:w-auto sm:flex-1" onClick={go} disabled={!chosen.length || pending.length > 0} data-testid="hero-go">
+                <Button variant="primary" size="lg" className="w-full sm:w-auto sm:flex-1" onClick={go} disabled={!chosen.length} data-testid="hero-go">
                   Find my areas <ArrowRight size={17} />
                 </Button>
               ) : (

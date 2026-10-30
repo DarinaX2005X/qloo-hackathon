@@ -109,7 +109,7 @@ export const AddressResultV2 = z.object({
 export type AddressResultV2 = z.infer<typeof AddressResultV2>;
 export const CityComparisonV2 = z.object({
   criteria: z.array(z.string()), referenceVersion: Id,
-  method: z.enum(["home_style_music_v1", "home_style_only_v1", "personal_tags_v1"]).optional(),
+  method: z.enum(["home_style_music_v1", "home_style_only_v1", "personal_tags_v1", "personal_area_rank_v1"]).optional(),
   results: z.array(z.object({
     cityId: Id, cityName: z.string(), status: z.enum(["ok", "partial", "error"]),
     error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).optional(),
@@ -119,6 +119,8 @@ export const CityComparisonV2 = z.object({
 });
 export type CityComparisonV2 = z.infer<typeof CityComparisonV2>;
 export const VisitResultV2 = z.object({
+  /** Actual visit search boundary. Wider context is allowed only for a walk without user rules. */
+  searchAreas: z.array(z.object({ area: AreaIdentity, radiusM: z.union([z.literal(650), z.literal(1600)]) })).optional(),
   itinerary: Itinerary, constraints: z.array(Constraint), venueEvidence: z.record(z.string(), VenueEvidence), audit: AuditV2,
   recoveryLog: z.array(z.object({
     reason: z.string(), action: z.enum(["alternate_venue", "wider_radius", "alternate_area", "fewer_stops"]),
@@ -194,6 +196,8 @@ export type CitiesRequestV2 = z.infer<typeof CitiesRequestV2>;
 export const CitiesResponseV2 = CityComparisonV2.extend({ meta: ResultMeta, evidence: z.array(EvidenceRef) });
 export type CitiesResponseV2 = z.infer<typeof CitiesResponseV2>;
 export const PlanRequestV2 = AnalysisRequestV2.extend({
+  /** False for an address-local walk; user constraints also prevent automatic expansion. */
+  allowContextExpansion: z.boolean().optional(),
   areaIds: z.array(Id).min(1).max(3), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   /** A visit may start in the afternoon without changing the legacy morning preference. */
   startHour: z.number().int().min(6).max(22).optional(),

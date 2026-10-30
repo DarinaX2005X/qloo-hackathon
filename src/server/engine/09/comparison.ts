@@ -1,39 +1,40 @@
-import { activeLoves, ApiError, apiError } from "@/shared/contracts";
+import { ApiError, apiError } from "@/shared/contracts";
 import type { CitiesRequestV2, CitiesResponseV2, CityComparisonV2, EvidenceRef, HomeMatchV2 } from "@/shared/contracts-09";
-import { qlooRead, resultRows } from "@/server/qloo/client";
-import { tagRef } from "@/server/qloo/search";
 import { median } from "../geo";
-import { DerivedCache, effectiveConstraints, evidenceRef, hash, mapLimit, normalized, resultMeta, uniqueEvidence } from "./core";
+import { effectiveConstraints, mapLimit, normalized, resultMeta, uniqueEvidence } from "./core";
 import { homeMethod, matchSignatures, resolveSourceSignature } from "./home-api";
 import { cityManifest } from "./manifest";
-import { signatureReference, substantiveStyleTag, targetSignatures, type AreaSignature, type SignatureFeature } from "./signatures";
+import { signatureReference, targetSignatures } from "./signatures";
 
-type ProfileSignature = Pick<AreaSignature, "style" | "music" | "quality" | "evidence">;
-const profiles = new DerivedCache<ProfileSignature>(80, undefined, "personal-signature:v1");
-async function personalSignature(input: CitiesRequestV2): Promise<ProfileSignature> {
-  const ids = activeLoves(input.state.loves).map(l => l.chosen.id).sort();
-  if (!ids.length) throw apiError("bad_input", "Add a resolved love or choose a former neighborhood before comparing cities.");
-  return (await profiles.get(hash(ids), async () => {
-    const evidence: EvidenceRef[] = [];
-    const readFamily = async (family: string): Promise<SignatureFeature[]> => {
-      try {
-        const read = await qlooRead("/v2/insights", { "filter.type": "urn:tag", "filter.tag.types": family, "signal.interests.entities": ids.join(","), take: 25 });
-        evidence.push(evidenceRef("qloo_tags", read, ids, "personal_tags_v1"));
-        return resultRows(read.value, "tags").flatMap((row, rank) => {
-          const tag = tagRef(row);
-          return tag && (family.includes("music") ? tag.id.startsWith("urn:tag:genre:music:") : substantiveStyleTag(tag)) ? [{ id: tag.id, label: tag.name, tf: 1 / (rank + 2) }] : [];
-        });
-      } catch { return []; }
-    };
-    const [ambience, decor, music] = await Promise.all([readFamily("urn:tag:ambience:qloo"), readFamily("urn:tag:decor:qloo"), readFamily("urn:tag:genre:music")]);
-    const style = [...new Map([...ambience, ...decor].map(f => [f.id, f])).values()];
-    return { style, music, quality: style.length ? "sufficient" as const : "limited" as const, evidence };
-  })).value;
+import { analyzeAreas } from "./ranking";
+
+async function personalCities(input: CitiesRequestV2): Promise<CitiesResponseV2> {
+  const evidence: EvidenceRef[] = [];
+  const results = await mapLimit([...new Set(input.cities.map(c => c.trim()))], 2, async (city): Promise<CityComparisonV2["results"][number]> => {
+    try {
+      const { value: analysis } = await analyzeAreas({ ...input, state: { ...input.state, city } });
+      const top = analysis.areas[0];
+      evidence.push(...analysis.evidence);
+      return { cityId: analysis.manifest.cityId, cityName: analysis.manifest.cityName, status: top?.metrics.support.quality === "sufficient" ? "ok" : "partial",
+        areas: top ? [top] : [], culturalOverlap: null, eligibleCategories: [...new Set(top?.anchors.map(v => v.role) ?? [])],
+        support: top?.metrics.support.quality ?? "unavailable", evidenceIds: analysis.evidence.map(e => e.id) };
+    } catch (error) {
+      const parsed = ApiError.safeParse(error);
+      return { cityId: `unresolved:${normalized(city).replace(/ /g, "-")}`, cityName: city, status: "error", error: parsed.success ? parsed.data.error : { code: "qloo_unavailable", message: `Data for ${city} could not be retrieved.`, retryable: true }, areas: [], culturalOverlap: null, eligibleCategories: [], support: "unavailable", evidenceIds: [] };
+    }
+  });
+  if (results.every(r => r.status === "error")) throw apiError("bad_input", results.map(r => `${r.cityName}: ${r.error?.message ?? "could not be checked"}`).join(" "));
+  const selected = await cityManifest(input.state.city).catch(() => null);
+  const geography = selected?.value ?? { cityId: `unresolved:${normalized(input.state.city)}`, version: "unavailable", fetchedAt: new Date().toISOString() };
+  return { meta: resultMeta(input, geography, { method: "personal_area_rank_v1", partial: results.some(r => r.status !== "ok"), suffix: input.cities, dataAsOf: evidence.map(e => e.fetchedAt).sort()[0] }),
+    criteria: ["best_area_for_your_tastes", "places_to_check"], referenceVersion: "within-city-area-ranks-v1", method: "personal_area_rank_v1", results, recommendation: null, evidence: uniqueEvidence(evidence) };
 }
+
 export async function citiesV2(input: CitiesRequestV2): Promise<CitiesResponseV2> {
+  if (!input.source) return personalCities(input);
   const before = JSON.stringify(input.state);
   const reference = await signatureReference();
-  const source = input.source ? await resolveSourceSignature(input.source) : await personalSignature(input);
+  const source = await resolveSourceSignature(input.source);
   const method = homeMethod(source, reference);
   const evidence: EvidenceRef[] = [...reference.evidence, ...source.evidence];
   const results = await mapLimit([...new Set(input.cities.map(c => c.trim()))], 2, async (city): Promise<CityComparisonV2["results"][number]> => {
