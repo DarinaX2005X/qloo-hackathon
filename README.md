@@ -11,6 +11,7 @@ Tell Homing a few things you love. It maps where people with your taste gather i
   <a href="https://homing-taste.vercel.app/#demo">Watch the 56-second film</a> &nbsp;&nbsp;
   <a href="https://homing-taste.vercel.app"><strong>Try it live</strong></a> &nbsp;&nbsp;
   <a href="#how-it-works">How it works</a> &nbsp;&nbsp;
+  <a href="#architecture">Architecture</a> &nbsp;&nbsp;
   <a href="#run-it-locally">Run it locally</a>
 </p>
 
@@ -96,6 +97,96 @@ where $a_i$ is the percentile of love $i$ in the cell, $w_i$ your weight, $r = 0
 
 **The agent** runs on OpenRouter (`google/gemini-3.8-flash`) with tools that call the same engine. It never invents places: it can only change the state, look things up in Qloo and read the resulting ranking. Each tool call is streamed to the UI as it happens.
 
+## Architecture
+
+Homing is one Next.js app. The browser holds the state and draws the map; route handlers on Vercel run the taste engine and the agent; Qloo is the only source of taste data.
+
+```
+ Browser                                   Vercel (Next.js route handlers)                 External
+ ───────                                   ───────────────────────────────                 ────────
+ Landing ──── GET /api/landing ──────────► scenes: field + ranking + city compare ─┐
+   loader waits for every map              (one answer, CDN-cached for a day)      │
+                                                                                    │
+ Explore (React store, state in URL)                                               │
+   ├─ POST /api/field ─────────────────► engine/field.ts       heatmaps per love ──┤
+   ├─ POST /api/neighborhoods ─────────► engine/neighborhoods  places → areas      │
+   ├─ POST /api/places ────────────────► engine/places.ts      picks per category  ├──► Qloo Taste AI
+   ├─ POST /api/plan ──────────────────► engine/plan.ts        hours + walking     │    /search, /v2/insights,
+   ├─ POST /api/cities ────────────────► engine/cities.ts      same taste, 5 cities│    /v2/tags
+   ├─ POST /api/fingerprint ───────────► engine/fingerprint    taste tags          │
+   ├─ GET  /api/search, /api/tags ─────► qloo/search.ts        entities, genres ───┘
+   ├─ GET  /api/localities ────────────► Photon + Open-Meteo geocoding (city suggestions)
+   ├─ POST /api/intake ────────────────► agent/intake.ts ──────────────────────────► OpenRouter
+   └─ POST /api/agent  (SSE stream) ───► agent/runner.ts → tools → engine ─────────► (Gemini 3.8 Flash)
+ MapLibre GL ◄── vector tiles ───────────────────────────────────────────────────── OpenFreeMap
+```
+
+### Repository map
+
+| Path | What lives there |
+| --- | --- |
+| `src/shared/contracts.ts` | Zod schemas for everything that crosses the wire: `ExploreState`, `TasteField`, `Neighborhood`, `Place`, `Itinerary`, `CityScore`, `StatePatch`, `AgentEvent`. Server and client import the same types. |
+| `src/shared/patches.ts` | `applyPatches`: the only way state changes, for the UI and the agent alike. Enforces limits (8 loves, 4 refinements) and skips invalid ops. |
+| `src/lib/state.ts` | The whole map state as compact base64url in `?s=`. A shared link recomputes the same map. |
+| `src/server/qloo/` | `client.ts` (cache, concurrency, retries, response trimming) and `search.ts` (entity search, genre stand-ins, tag search). |
+| `src/server/engine/` | The taste engine: city centre, field, neighborhoods, fingerprint, places, plan, city comparison. Pure functions over Qloo responses. |
+| `src/server/agent/` | LLM client, fast planner, tool loop, grounded final reply, screenshot intake. |
+| `src/app/api/*` | Thin route handlers: validate with Zod, call the engine, map errors to HTTP codes. |
+| `src/components/map/` | `TerrainMap` (MapLibre), `hexgrid.ts` (interpolation onto hexes, colour ramps, two inks), the paper map style. |
+| `src/components/explore/` | The workspace: store, panels, chips, trip controls, place drawer, compare dialogs, agent chat. |
+| `src/components/landing/` | The landing page, its data provider and loader. |
+| `tests/` | Vitest unit and route tests, live Qloo tests, a Playwright end-to-end run against production. |
+
+### One map, end to end
+
+1. The explore page decodes `?s=` into an `ExploreState` (Zod-validated; a broken link falls back to an empty state).
+2. The store asks `/api/field`. The engine finds the city centre (the median of Qloo's most popular places there), then requests one heatmap per love plus a combined one around that point. Geohash-7 cells are folded to geohash-6, every series becomes a percentile inside the city, and the series are weighted, blended with refinement layers and discounted by popularity according to the crowd dial.
+3. `/api/neighborhoods` reuses the field: Qloo places in the area name the neighborhoods, cells are assigned to them, and each gets a score, drivers (which love lifts it) and matched taste tags.
+4. The client interpolates cells onto a 130 m hex grid and animates the extrusion heights through a MapLibre paint expression, so a change re-forms the same columns instead of redrawing them.
+5. Opening a neighborhood calls `/api/places` (per-category Qloo place insights around its centre); `/api/plan` turns them into a day-by-day route.
+
+Every request that changes the map is guarded on the client by a sequence number, so a slow answer for an old city or an old plan never lands on a new one. URL updates use `replaceState`, except opening a neighborhood, which pushes a history entry so the browser Back button returns to the ranking.
+
+### Talking to Qloo
+
+`src/server/qloo/client.ts` is the single door to Qloo:
+
+- **Caching.** Responses are cached in process for 7 days and through Next's fetch cache (`revalidate: 604800`). Identical requests in flight are shared, not repeated.
+- **Back-pressure.** At most 4 Qloo requests run at once per instance; the rest wait in a queue.
+- **Resilience.** A 9 s timeout per call; 429 is retried twice with jittered backoff, 5xx and network errors once. Failures surface as typed errors (`quota`, `qloo_unavailable`, `not_found`) that the UI explains in plain words.
+- **Trimming.** Only the fields the engine reads are kept. Qloo data is never written to this repository; test fixtures are generated locally and ignored by git.
+
+### The agent
+
+`POST /api/agent` streams Server-Sent Events: `trace` (a tool call and what it did), `patch` (state changes), `delta` (reply text), then `done` or `error`.
+
+- **Fast path.** One JSON-mode call turns the request into a small change plan: patches, names to look up, place preferences. The server runs all lookups against Qloo in parallel, validates the patches, applies them and re-ranks. Most requests finish here in a few seconds.
+- **Tool loop.** Anything the planner can't express falls back to a tool loop over `search_entities`, `search_place_tags`, `apply_changes`, `get_ranking` and `explain_neighborhood`, with at most 8 tool decisions.
+- **Grounding.** The agent can change state only through patches and can read only what Qloo returns. The final reply is written from the actual ranking before and after the change, so it can't invent a neighborhood or a place.
+- **Screenshot intake** (`/api/intake`) sends a validated PNG, JPEG or WebP (up to 4 MB) to the model, which extracts names; Qloo resolves them like typed chips.
+
+### The landing page
+
+The landing shows four live maps. `GET /api/landing` builds all of them on the server in one go (entities, fields, rankings and a five-city comparison) and returns one response that the CDN keeps for a day and serves stale while it refreshes. The page preloads that response, the map style and the tile host before hydration. A loader stays up until every map reports that its terrain is drawn and its tiles are in, then opens like a curtain.
+
+### Technology
+
+| Technology | Why |
+| --- | --- |
+| **Next.js 16** (App Router, Turbopack) | Pages and API in one deployable; route handlers keep the Qloo and OpenRouter keys on the server. |
+| **React 19** | A context store for the workspace; concurrent rendering keeps the map smooth while panels update. |
+| **TypeScript + Zod 4** | One set of schemas validates requests, Qloo-derived data, agent patches and the URL state. |
+| **MapLibre GL 5** | Open-source WebGL maps: `fill-extrusion` for the terrain, data-driven paint expressions for animation and two inks. |
+| **OpenFreeMap** | Free vector tiles, restyled into a quiet paper atlas so the terrain reads first. |
+| **Qloo Taste AI** | Entities, heatmaps, places and tags: the data the whole product is built on. |
+| **OpenRouter, Gemini 3.8 Flash** | Fast tool calling and JSON mode for the agent; vision for screenshots. |
+| **Photon, Open-Meteo geocoding** | City suggestions for any place in the world, queried in parallel so one slow provider doesn't block typing. |
+| **Motion** | Spring-based UI motion: chips, panels, the loader. |
+| **Tailwind CSS 4** | Design tokens in OKLCH, one paper palette for the map and the UI. |
+| **Vitest** | Engine, agent, patch and route tests; live Qloo tests behind `QLOO_LIVE=1`. |
+| **Playwright** | 16 end-to-end scenarios against production (`node tests/e2e/run.mjs`). |
+| **Vercel** | Hosting, the function runtime and the CDN cache for the landing data. |
+
 ## Run it locally
 
 ```bash
@@ -117,9 +208,9 @@ Open http://localhost:3000.
 
 `npm test` runs the engine, agent and state tests. Tests that call Qloo live run only with `QLOO_LIVE=1`.
 
-## Stack
+## Data handling
 
-Next.js 16 (App Router), React 19, TypeScript, MapLibre GL with OpenFreeMap tiles, Motion, Zod, Vitest, Tailwind CSS 4. Deployed on Vercel. Qloo responses are cached server side and never stored in this repository.
+Qloo responses are cached on the server and never stored in this repository. Keys live in `.env.local` and in the Vercel project settings.
 
 ## Limits
 
