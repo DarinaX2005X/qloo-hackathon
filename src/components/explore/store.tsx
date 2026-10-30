@@ -1,7 +1,9 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import type {
+  AgentCard,
   AgentEvent,
   Category,
   CityScore,
@@ -28,8 +30,30 @@ export type ChatTurn = {
   role: "user" | "assistant";
   text: string;
   trace: { tool: string; summary: string }[];
+  /** rich results the agent attached to this turn (ranking, home, spot, decides) */
+  cards: AgentCard[];
   pending?: boolean;
   error?: string;
+  /** the person stopped this answer before it finished */
+  stopped?: boolean;
+};
+
+/** What a screen draws on the shared map, on top of or instead of the taste terrain. */
+export type MapOverlay = {
+  /** replaces the taste field on the map (Feels like home shows the old neighborhood printed over the new city) */
+  field?: TasteField | null;
+  /** replaces the ranked neighborhood plates */
+  neighborhoods?: Neighborhood[];
+  /** a pin for an address */
+  pin?: { lon: number; lat: number; label: string } | null;
+  /** a walking radius around the pin, metres */
+  ring?: { lon: number; lat: number; meters: number } | null;
+  /** place dots */
+  places?: Place[];
+  /** fly the camera here */
+  focus?: [number, number] | null;
+  /** a click on the map while this overlay is up (for example, check the clicked spot); replaces "open the nearest neighborhood" */
+  onMapClick?: (lngLat: [number, number]) => void;
 };
 
 type Pending = Record<string, true>; // queries being looked up
@@ -69,6 +93,12 @@ function useStore() {
   const [compare, setCompare] = useState<string[]>([]);
   const [cities, setCities] = useState<Load<CityScore[]> & { asked: string[] }>({ data: null, loading: false, error: null, asked: [] });
   const [swapping, setSwapping] = useState<string | null>(null);
+  const [overlayRaw, setOverlayRaw] = useState<{ o: MapOverlay; path: string } | null>(null);
+  const [planDay, setPlanDay] = useState(0);
+  const pathname = usePathname() ?? "/explore";
+  const pathRef = useRef(pathname);
+  pathRef.current = pathname;
+  const agentAbort = useRef<AbortController | null>(null);
   const excludeRef = useRef<string[]>([]);
   const includeRef = useRef<string[]>([]);
   excludeRef.current = exclude;
@@ -91,9 +121,12 @@ function useStore() {
 
   // keep URL in sync, remember recent explorations
   // opening a neighborhood is a step the browser's Back button undoes; everything else edits the current entry
+  // Back between screens keeps the taste as it is now; Back within one screen (an opened neighborhood) restores that step.
   const lastHood = useRef<string | null | undefined>(undefined);
+  const lastPath = useRef<string | null>(null);
   useEffect(() => {
     const onPop = () => {
+      if (lastPath.current !== null && window.location.pathname !== lastPath.current) return;
       const s = decodeState(new URLSearchParams(window.location.search).get("s"));
       if (!s) return;
       lastHood.current = s.neighborhood ?? null;
@@ -102,14 +135,31 @@ function useStore() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+  // While the app moves to another screen, the URL sync waits: writing the old path now would cancel the move.
+  const navTo = useRef<{ path: string; at: number } | null>(null);
+  const beginNav = useCallback((path: string) => {
+    navTo.current = { path, at: Date.now() };
+  }, []);
+  // every screen carries the current state in its URL, whatever link or history entry brought the person there
+  useEffect(() => {
+    navTo.current = null;
+    lastPath.current = pathname;
+    if (!hydrated) return;
+    const enc = encodeState(stateRef.current);
+    if (new URLSearchParams(window.location.search).get("s") !== enc) window.history.replaceState(null, "", `${window.location.pathname}?s=${enc}`);
+  }, [pathname, hydrated]);
   useEffect(() => {
     if (!hydrated) return;
+    const nav = navTo.current;
+    if (nav && nav.path !== window.location.pathname && Date.now() - nav.at < 4000) return;
     const enc = encodeState(state);
     const url = `${window.location.pathname}?s=${enc}`;
     const hood = state.neighborhood ?? null;
     const deeper = lastHood.current !== undefined && hood !== null && hood !== lastHood.current;
     lastHood.current = hood;
-    if (deeper) window.history.pushState(null, "", url);
+    if (new URLSearchParams(window.location.search).get("s") === enc) {
+      /* the URL already says this */
+    } else if (deeper) window.history.pushState(null, "", url);
     else window.history.replaceState(null, "", url);
     if (activeLoves(state.loves).length) {
       try {
@@ -216,7 +266,10 @@ function useStore() {
     setPlan({ data: null, loading: true, error: null });
     try {
       const data = await api.plan(s, ids, { exclude: ex, include: inc });
-      if (seq === planSeq.current) setPlan({ data, loading: false, error: null });
+      if (seq === planSeq.current) {
+        setPlan({ data, loading: false, error: null });
+        setPlanDay((d) => (d < data.days.length ? d : 0));
+      }
     } catch (e) {
       if (seq === planSeq.current) setPlan({ data: null, loading: false, error: e as HomingError });
     }
@@ -394,29 +447,55 @@ function useStore() {
   // --- agent
   const askAgent = useCallback(
     async (message: string) => {
-      const text = message.trim();
+      const text = message.trim().slice(0, 1000);
       if (!text || agentBusy) return;
       const uid = Date.now();
-      const history = chat.slice(-8).map((t) => ({ role: t.role, content: t.text }));
+      const history = chat
+        .filter((t) => t.text)
+        .slice(-8)
+        .map((t) => ({ role: t.role, content: t.text }));
       setChat((c) => [
         ...c,
-        { id: uid, role: "user", text, trace: [] },
-        { id: uid + 1, role: "assistant", text: "", trace: [], pending: true },
+        { id: uid, role: "user", text, trace: [], cards: [] },
+        { id: uid + 1, role: "assistant", text: "", trace: [], cards: [], pending: true },
       ]);
       setAgentBusy(true);
+      const ac = new AbortController();
+      agentAbort.current = ac;
       const upd = (fn: (t: ChatTurn) => ChatTurn) => setChat((c) => c.map((t) => (t.id === uid + 1 ? fn(t) : t)));
-      await streamAgent({ state: stateRef.current, message: text, history }, (e: AgentEvent) => {
-        if (e.type === "trace") upd((t) => ({ ...t, trace: [...t.trace, { tool: e.tool, summary: e.summary }] }));
-        else if (e.type === "patch") patch(e.ops);
-        else if (e.type === "delta") upd((t) => ({ ...t, text: t.text + e.text }));
-        else if (e.type === "error") upd((t) => ({ ...t, pending: false, error: e.error.message }));
-        else if (e.type === "done") upd((t) => ({ ...t, pending: false }));
-      });
-      upd((t) => ({ ...t, pending: false }));
+      await streamAgent(
+        { state: stateRef.current, message: text, history },
+        (e: AgentEvent) => {
+          if (ac.signal.aborted) return;
+          if (e.type === "trace") upd((t) => ({ ...t, trace: [...t.trace, { tool: e.tool, summary: e.summary }] }));
+          else if (e.type === "patch") patch(e.ops);
+          else if (e.type === "delta") upd((t) => ({ ...t, text: t.text + e.text }));
+          // one card per kind per turn: a later ranking replaces the earlier one
+          else if (e.type === "card") upd((t) => ({ ...t, cards: [...t.cards.filter((c) => c.kind !== e.card.kind), e.card] }));
+          else if (e.type === "error") upd((t) => ({ ...t, pending: false, error: e.error.message }));
+          else if (e.type === "done") upd((t) => ({ ...t, pending: false }));
+        },
+        ac.signal,
+      );
+      upd((t) => ({ ...t, pending: false, stopped: ac.signal.aborted && !t.error ? true : t.stopped }));
+      if (agentAbort.current === ac) agentAbort.current = null;
       setAgentBusy(false);
     },
     [agentBusy, chat, patch],
   );
+  const stopAgent = useCallback(() => agentAbort.current?.abort(), []);
+  const clearChat = useCallback(() => {
+    agentAbort.current?.abort();
+    setChat([]);
+  }, []);
+  /** a line from Homing in the conversation that did not come from the agent, e.g. what a screenshot added */
+  const addNote = useCallback((text: string) => {
+    setChat((c) => [...c, { id: Date.now(), role: "assistant", text, trace: [], cards: [] }]);
+  }, []);
+
+  // --- map overlay: it belongs to the screen that set it, so an overlay a screen forgot to clear never leaks onto another
+  const setOverlay = useCallback((o: MapOverlay | null) => setOverlayRaw(o ? { o, path: pathRef.current } : null), []);
+  const overlay = overlayRaw && overlayRaw.path === pathname ? overlayRaw.o : null;
 
   const retry = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -431,6 +510,15 @@ function useStore() {
   );
 
   return {
+    beginNav,
+    overlay,
+    setOverlay,
+    planDay,
+    setPlanDay,
+    stopAgent,
+    clearChat,
+    addNote,
+    pathname,
     exclude,
     include,
     saved,

@@ -8,7 +8,7 @@ import { LoveChip, LoveInput, PendingChip } from "./LoveChips";
 import { useExplore } from "./store";
 import { api } from "./api";
 import { Button } from "@/components/ui/primitives";
-import { AgentChat } from "./AgentChat";
+import { AskBar } from "./AskBar";
 import { TripControls } from "./TripControls";
 import { RecentMaps } from "./RecentMaps";
 
@@ -209,7 +209,7 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
           </AnimatePresence>
         </section>
       </div>
-      {ex.state.loves.length > 0 && <AgentChat compact={compact} />}
+      {ex.state.loves.length > 0 && <AskBar />}
     </div>
   );
 }

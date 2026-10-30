@@ -250,6 +250,8 @@ try {
     });
     await step('Plan my first days produces >= 6 stops', page, async () => {
       await page.getByRole('button', { name: 'Plan my first days', exact: true }).click();
+      // The plan opens on the Trip screen as a day-by-day timeline.
+      await page.waitForURL(u => u.pathname === '/explore/trip');
       const stops = await countAtLeast(page, 'plan-stop', 6);
       await page.getByTestId('plan-stop').first().scrollIntoViewIfNeeded();
       await shot(page, 'plan');
@@ -258,22 +260,22 @@ try {
   });
   await scenario('5', 'Agent less touristy reply and Crowd change within 20 seconds', async () => {
     await step('Agent replies >= 20 characters and range moves above 0.5', page, async () => {
-      if (!await page.getByTestId('agent-input').count()) await openTaste(page);
-      const dial = page.getByRole('slider', { name: 'Popular or local' });
-      const before = Number(await dial.inputValue());
-      const input = page.getByTestId('agent-input');
-      const chat = input.locator('xpath=ancestor::form/parent::div');
-      // Assistant final paragraphs have leading-relaxed; user bubbles and tool
-      // traces have different markup. Never count the echoed prompt/tool trace.
-      const replies = chat.locator('p.leading-relaxed');
+      // The Map screen has a one-line "Ask Homing" bar; it sends the question and opens the Assistant screen.
+      if (!await page.getByTestId('ask-input').count()) await openTaste(page);
+      const crowd = () => stateOf(page).x ?? 0.35;
+      const before = crowd();
+      const input = page.getByTestId('ask-input');
+      // Only the assistant's answer paragraphs carry this test id; never count the echoed prompt or tool trace.
+      const replies = page.getByTestId('assistant-reply');
       const oldCount = await replies.count();
       await input.fill('less touristy');
       const begin = performance.now();
       await input.press('Enter');
-      await poll(async () => await replies.count() > oldCount && (await replies.last().innerText()).trim().length >= 20 && Number(await dial.inputValue()) > 0.5, 'New assistant reply >= 20 chars AND Crowd > 0.5', Math.max(1, TIMEOUT - (performance.now() - begin)));
+      await page.waitForURL(u => u.pathname === '/explore/assistant');
+      await poll(async () => await replies.count() > oldCount && (await replies.last().innerText()).trim().length >= 20 && crowd() > 0.5, 'New assistant reply >= 20 chars AND Crowd > 0.5', Math.max(1, TIMEOUT - (performance.now() - begin)));
       const responseMs = Math.round(performance.now() - begin);
       assert.ok(responseMs <= TIMEOUT, `Agent took ${responseMs} ms > 20000 ms`);
-      const after = Number(await dial.inputValue());
+      const after = crowd();
       assert.ok(after > before, `Crowd did not increase: ${before} → ${after}`);
       await shot(page, 'agent');
       return { responseMs, before, after, reply: await replies.last().innerText() };
@@ -284,10 +286,16 @@ try {
       await input.press('Enter');
       await poll(async () => {
         const tags = stateOf(page).r || [];
-        return ['Quiet', 'Waterfront'].every(name => tags.some(t => t[1].toLowerCase() === name.toLowerCase()));
+        // the agent may pick Qloo's "Water" or "Waterfront" tag for "near the water"
+        return tags.some(t => /^quiet$/i.test(t[1])) && tags.some(t => /^water(front)?$/i.test(t[1]));
       }, 'Quiet and Waterfront resolved in URL', LOAD_TIMEOUT);
-      for (const name of ['Quiet', 'Waterfront']) await page.getByRole('button', { name: `Remove ${name}`, exact: true }).waitFor({ state: 'visible' });
       await shot(page, 'agent-refinements');
+      // The must-haves live in the taste panel on the Map screen.
+      await page.getByTestId('nav-map').click();
+      await page.waitForURL(u => u.pathname === '/explore');
+      await page.getByRole('button', { name: 'Remove Quiet', exact: true }).waitFor({ state: 'visible' });
+      await page.getByRole('button', { name: /^Remove Water(front)?$/ }).first().waitFor({ state: 'visible' });
+      await shot(page, 'agent-refinements-map');
       return { refinements: stateOf(page).r };
     });
   });
@@ -526,6 +534,7 @@ try {
       await page.getByTestId('neighborhood-row').first().click();
       await countAtLeast(page, 'place-card', 1);
       await page.getByRole('button', { name: 'Plan my first days', exact: true }).click();
+      await page.waitForURL(u => u.pathname === '/explore/trip');
       beforeCount = await countAtLeast(page, 'plan-stop', 1);
       const packedResponse = page.waitForResponse(r => new URL(r.url()).pathname === '/api/plan' && r.request().postDataJSON()?.pace === 'packed', { timeout: LOAD_TIMEOUT });
       void packedResponse.catch(() => {});
@@ -553,7 +562,10 @@ try {
       await shot(page, 'swapped-stop');
       return { before: firstStop, after: changed[0], stops: changed.length };
     });
-    await step('Place drawer Save is reflected in ranking Saved tab', page, async () => {
+    await step('Place drawer Save is reflected in the Trip screen shortlist', page, async () => {
+      // Back to the Map screen, where the opened neighborhood still lists its places.
+      await page.getByTestId('nav-map').click();
+      await page.waitForURL(u => u.pathname === '/explore');
       const card = page.getByTestId('place-card').first();
       await card.waitFor();
       const name = await card.getByRole('heading').innerText();
@@ -566,7 +578,9 @@ try {
       await page.getByRole('button', { name: 'Back', exact: true }).click();
       await page.getByRole('button', { name: 'All neighborhoods', exact: true }).click();
       await page.getByRole('heading', { name: 'Your neighborhoods', exact: true }).waitFor();
-      await page.getByRole('radio', { name: /^Saved\b/ }).click();
+      // The shortlist lives on the Trip screen.
+      await page.getByTestId('nav-trip').click();
+      await page.waitForURL(u => u.pathname === '/explore/trip');
       await page.getByTestId('place-card').getByRole('heading', { name, exact: true }).waitFor();
       const planSaved = page.getByRole('button', { name: /^Plan around these \d+$/ });
       await planSaved.waitFor();
@@ -578,8 +592,10 @@ try {
     await step('Lisbon + Berlin + a third city compare; first result is 100 and map action switches city', page, async () => {
       await openTaste(page);
       const originalCity = stateOf(page).c;
-      await page.getByRole('button', { name: 'Compare cities', exact: true }).click();
-      const dialog = page.getByRole('dialog', { name: 'Compare cities', exact: true });
+      // Compare is its own screen; the cities are its "Compare cities" section.
+      await page.getByTestId('nav-compare').click();
+      await page.waitForURL(u => u.pathname === '/explore/compare');
+      const dialog = page.getByRole('region', { name: 'Compare cities', exact: true });
       await dialog.waitFor();
       for (const name of ['Lisbon', 'Berlin']) await dialog.getByRole('button', { name: `Remove ${name}`, exact: true }).waitFor();
       // Exercise adding a city even though a third default is provided.
@@ -603,7 +619,7 @@ try {
         if (name !== originalCity.split(',')[0]) { target = name; await action.click(); break; }
       }
       assert.ok(target, 'No successful result for a different city');
-      await dialog.waitFor({ state: 'hidden' });
+      await page.waitForURL(u => u.pathname === '/explore');
       await poll(() => stateOf(page).c.split(',')[0] === target, `City URL switches to ${target}`);
       await countAtLeast(page, 'neighborhood-row', 3);
       await mapReady(page);

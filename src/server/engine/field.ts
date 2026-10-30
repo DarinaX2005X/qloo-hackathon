@@ -11,6 +11,7 @@ export type LoveMap = { love: ReturnType<typeof activeLoves>[number]; cells: Hea
 export type LoveSeries = { love: LoveMap["love"]; values: Map<string, number> };
 export type PersonMaps = { combined: HeatCell[]; individual: LoveMap[] };
 export type PersonField = { scores: Map<string, number>; drivers: Map<string, Record<string, number>>; missing: string[] };
+export type FieldOptions = { groups: { loves: ResolvedLove[]; weight: number }[] };
 
 export function heatCell(row: QlooRecord): HeatCell | null {
   const location = record(row.location);
@@ -140,7 +141,7 @@ export function personField(state: ExploreState, maps: PersonMaps, tags: Map<str
   return { scores, drivers, missing: maps.individual.filter(({ cells }) => !cells.some((cell) => cell.affinity > 0)).map(({ love }) => love.query) };
 }
 
-export async function buildField(state: ExploreState): Promise<TasteField> {
+export async function buildField(state: ExploreState, options?: FieldOptions): Promise<TasteField> {
   const [center, yours, theirs, tagMaps] = await Promise.all([
     cityCenter(state.city), loadPersonMaps(state.city, state.loves),
     state.companion ? loadPersonMaps(state.city, state.companion.loves) : undefined,
@@ -158,6 +159,15 @@ export async function buildField(state: ExploreState): Promise<TasteField> {
   const retained = new Set(local.map((cell) => cell.h));
   const tags = tagMaps.map((map) => localPercentiles(map, retained)).filter((map) => [...map.values()].some((value) => value > 0));
   const you = personField(state, yours, tags, local);
+  if (options?.groups.length) {
+    // Blend complete signals after their own within-city ranking, including two signals in the same domain.
+    const loaded = await Promise.all(options.groups.filter((group) => group.weight > 0 && activeLoves(group.loves).length).map(async (group) => ({
+      weight: group.weight, field: personField(state, await loadPersonMaps(state.city, group.loves), tags, local),
+    })));
+    const groups = loaded.filter((group) => [...group.field.scores.values()].some((score) => score > 0));
+    const total = groups.reduce((sum, group) => sum + group.weight, 0);
+    if (total) for (const cell of local) you.scores.set(cell.h, groups.reduce((sum, group) => sum + group.weight * (group.field.scores.get(cell.h) ?? 0), 0) / total);
+  }
   const them = theirs ? personField(state, theirs, tags, local) : undefined;
   const cells = local.map((cell) => ({ h: cell.h, lat: cell.lat, lon: cell.lon, you: you.scores.get(cell.h) ?? 0,
     ...(them ? { them: them.scores.get(cell.h) ?? 0, both: Math.min(you.scores.get(cell.h) ?? 0, them.scores.get(cell.h) ?? 0) } : {}),

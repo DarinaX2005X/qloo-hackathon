@@ -250,6 +250,96 @@ export type CityScore = z.infer<typeof CityScore>;
 export const CitiesRequest = z.object({ state: ExploreState, cities: z.array(z.string().min(1).max(80)).min(2).max(5) });
 export const CitiesResponse = z.object({ cities: z.array(CityScore) });
 
+// ---------- Feels like home: a neighborhood you loved, translated into another city
+const LonLat = z.tuple([z.number(), z.number()]);
+export const HomeRequest = z.object({
+  /** the target city is state.city; with blend > 0 the person's own loves are mixed in */
+  state: ExploreState,
+  source: z.object({
+    city: z.string().trim().min(1).max(80),
+    neighborhood: z.string().trim().min(1).max(80),
+    /** optional exact centre, when the person clicked the map instead of typing */
+    point: LonLat.optional(),
+  }),
+  /** 0 = only the old neighborhood shapes the map, 1 = the old neighborhood and the person's loves weigh the same */
+  blend: z.number().min(0).max(1).default(0),
+});
+export type HomeRequest = z.infer<typeof HomeRequest>;
+export const HomePlace = z.object({ id: z.string(), name: z.string(), category: Category.nullable(), tags: z.array(z.string()).max(4) });
+export const HomeResult = z.object({
+  source: z.object({
+    city: z.string(),
+    neighborhood: z.string(),
+    center: LonLat,
+    /** the places that define the old neighborhood, used as Qloo signals */
+    places: z.array(HomePlace).max(12),
+    /** what the old neighborhood feels like (Qloo ambience/decor/genre tags) */
+    tags: z.array(z.string()).max(6),
+  }),
+  /** the target city printed with the old neighborhood's signal */
+  field: TasteField,
+  neighborhoods: z.array(Neighborhood).max(8),
+  /** for the top neighborhoods: what they share with home and which places stand in for which */
+  matches: z.array(z.object({
+    neighborhoodId: z.string(),
+    /** 0..100, how close it feels to home (top match is not forced to 100) */
+    similarity: z.number(),
+    sharedTags: z.array(z.string()).max(4),
+    twins: z.array(z.object({ source: HomePlace, target: HomePlace })).max(3),
+  })).max(3),
+});
+export type HomeResult = z.infer<typeof HomeResult>;
+
+// ---------- Check an address: one exact spot scored against the person's taste
+export const SpotRequest = z.object({
+  state: ExploreState,
+  /** a street address or place name inside state.city */
+  query: z.string().trim().min(2).max(160).optional(),
+  point: LonLat.optional(),
+}).refine((r) => r.query || r.point, { message: "query or point is required" });
+export type SpotRequest = z.infer<typeof SpotRequest>;
+export const SpotResult = z.object({
+  label: z.string(),
+  point: LonLat,
+  /** 0..1, the field value at the spot */
+  score: z.number(),
+  /** 0..100, share of the city's mapped area that fits this taste worse than the spot */
+  percentile: z.number(),
+  neighborhood: z.object({ id: z.string(), name: z.string(), rank: z.number().int() }).nullable(),
+  /** which loves lift this spot, like Neighborhood.drivers */
+  drivers: z.array(z.object({ love: z.string(), share: z.number() })).max(4),
+  /** places that fit the taste within a ~12 minute walk, nearest useful first */
+  walk: z.array(z.object({ place: Place, minutes: z.number() })).max(10),
+  counts: z.object({ coffee: z.number(), food: z.number(), drinks: z.number(), culture: z.number(), openLate: z.number() }),
+  /** one plain sentence built from the numbers, no model involved */
+  verdict: z.string(),
+});
+export type SpotResult = z.infer<typeof SpotResult>;
+
+// ---------- What decides: how much each love holds up the top of the ranking
+export const DecidesResult = z.object({
+  neighborhoods: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    rank: z.number().int(),
+    /** the rank this neighborhood would have without each love (null = drops out of the top 8) */
+    without: z.array(z.object({ query: z.string(), name: z.string(), rank: z.number().int().nullable() })),
+  })).max(3),
+  /** the love whose removal changes the number one, if any */
+  pivotal: z.string().nullable(),
+  /** true when the number one stays first without any single love */
+  robust: z.boolean(),
+  summary: z.string(),
+});
+export type DecidesResult = z.infer<typeof DecidesResult>;
+
+/** Rich results the agent can attach to its reply, shown as cards in the assistant. */
+export type AgentCard =
+  | { kind: "ranking"; neighborhoods: Neighborhood[] }
+  | { kind: "home"; result: HomeResult }
+  | { kind: "spot"; result: SpotResult }
+  | { kind: "decides"; result: DecidesResult };
+
 export const AgentMessage = z.object({ role: z.enum(["user", "assistant"]), content: z.string() });
 export const AgentRequest = z.object({
   state: ExploreState,
@@ -263,6 +353,7 @@ export type AgentEvent =
   | { type: "trace"; tool: string; summary: string }
   | { type: "patch"; ops: StatePatch[] }
   | { type: "delta"; text: string }
+  | { type: "card"; card: AgentCard }
   | { type: "done" }
   | { type: "error"; error: ApiError["error"] };
 

@@ -43,7 +43,8 @@ describe("fast agent", () => {
     expect(events[0]).toEqual({ type: "trace", tool: "agent", summary: "Checking your preferences" });
     const result = await pending;
     expect(result).toMatchObject({ discovery: 0.8, days: 2 });
-    expect(progress(events).map((e) => e.type)).toEqual(["trace", "patch", "trace", "delta", "delta", "done"]);
+    expect(progress(events).map((e) => e.type)).toEqual(["trace", "patch", "trace", "card", "delta", "delta", "done"]);
+    expect(events.find((e) => e.type === "card")).toMatchObject({ card: { kind: "ranking", neighborhoods: [neighborhood] } });
     expect(rankNeighborhoods).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ discovery: 0.8, days: 2 }));
     expect(model).toHaveBeenCalledTimes(2);
     const final = model.mock.calls[1][0];

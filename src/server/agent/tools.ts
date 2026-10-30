@@ -1,11 +1,15 @@
 import { z } from "zod";
-import { Domain, EntityRef, ExploreState, LIMITS, Neighborhood, ResolvedLove, StatePatch, TagRef } from "@/shared/contracts";
+import { Category, Domain, EntityRef, ExploreState, LIMITS, Neighborhood, ResolvedLove, StatePatch, TagRef, type AgentCard } from "@/shared/contracts";
 import { applyPatches } from "@/shared/patches";
 import { searchEntities, searchPlaceTags } from "@/server/qloo";
 import { rankNeighborhoods } from "@/server/engine";
 import { asFailure, fail, withSignal } from "./errors";
 import type { ChatTool } from "./llm";
-import { rankingChanged } from "./final";
+import { cardReply, neighborhoodReply, placesReply, rankingChanged } from "./final";
+import { findHome } from "@/server/engine/home";
+import { checkSpot } from "@/server/engine/spot";
+import { whatDecides } from "@/server/engine/decides";
+import { placesNear } from "@/server/engine/places";
 
 // filler words, and kinds of place the plan already covers by category (cafes, bars), so the tags carry the rest
 const STOP = new Set(["the", "and", "with", "near", "for", "from", "that", "this", "some", "place", "places", "spot", "spots", "find", "want", "like", "good", "nice", "lots", "more", "less", "very", "really",
@@ -22,6 +26,10 @@ export const ToolArguments = {
   apply_changes: z.strictObject({ ops: z.array(StatePatch).min(1).max(16) }),
   get_ranking: z.strictObject({}),
   explain_neighborhood: z.strictObject({ id: z.string().min(1).max(200) }),
+  find_home: z.strictObject({ city: z.string().trim().min(1).max(80), neighborhood: z.string().trim().min(1).max(80) }),
+  check_address: z.strictObject({ query: z.string().trim().min(2).max(160) }),
+  what_decides: z.strictObject({}),
+  get_places: z.strictObject({ neighborhood: z.string().min(1).max(200).optional(), categories: z.array(Category).min(1).max(5).optional() }),
 };
 
 export const AGENT_TOOLS: ChatTool[] = [
@@ -29,7 +37,11 @@ export const AGENT_TOOLS: ChatTool[] = [
   { name: "search_place_tags", description: "Find supported place tags for ONE preference, e.g. quiet, waterfront, laptop friendly, wifi. Search each idea separately in parallel. Use returned tag objects verbatim." },
   { name: "apply_changes", description: "Atomically validate and apply StatePatch ops, including set_budget(budget:1..4|null), set_pace(pace:relaxed|balanced|packed), set_start(hour:6..12), remove_love(query), set_weight(query,weight:0..1). Budget/pace/start/days change plans without reranking. Resolve only NEW entities/tags with search first. Patches are the only way to change state." },
   { name: "get_ranking", description: "Build the taste field and rank up to eight neighborhoods using the latest state. Call after changes when a recommendation is needed." },
-  { name: "explain_neighborhood", description: "Return evidence for a neighborhood from the current ranking; never invent a neighborhood id." },
+  { name: "explain_neighborhood", description: "Return evidence for a neighborhood from the current ranking; id can be a returned id or the name the user mentioned." },
+  { name: "find_home", description: "Find areas in the current city like an old neighborhood. city is the source city, neighborhood is the old area. Infer a missing source city only for a famous unambiguous neighborhood; otherwise ask. Does not change the profile." },
+  { name: "check_address", description: "Score an address or flat in the current city and find places within walking distance. query is the address. Does not change the profile." },
+  { name: "what_decides", description: "Measure robustness by removing each active love and reranking. Use for why an area is first, which love matters most, or how sure the ranking is." },
+  { name: "get_places", description: "Read real places for dinner, coffee, drinks or culture. Use the requested neighborhood name/id, or omit to use the selected/top neighborhood. Does not change state." },
 ].map(({ name, description }) => ({
   type: "function", function: { name, description, parameters: z.toJSONSchema(ToolArguments[name as keyof typeof ToolArguments]) },
 }));
@@ -42,11 +54,12 @@ export type ToolContext = {
   addedRefinements: Set<string>;
   references: Map<string, string>;
   signal: AbortSignal;
+  answers: string[];
 };
-export type ToolResult = { summary: string; value: unknown; ops?: StatePatch[] };
+export type ToolResult = { summary: string; value: unknown; ops?: StatePatch[]; card?: AgentCard };
 
 export function createToolContext(state: ExploreState, signal: AbortSignal): ToolContext {
-  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, addedRefinements: new Set(), references: new Map(), signal };
+  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, addedRefinements: new Set(), references: new Map(), signal, answers: [] };
   for (const love of [...state.loves, ...(state.companion?.loves ?? [])]) {
     for (const entity of [...love.candidates, ...(love.chosen ? [love.chosen] : [])]) context.entities.set(entityKey(entity), entity);
   }
@@ -164,7 +177,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
         for (const tag of next.refinements) {
           if (!context.state.refinements.some((current) => current.id === tag.id)) context.addedRefinements.add(tag.id);
         }
-        if (rankingChanged(context.state, next)) context.ranking = null;
+        if (rankingChanged(context.state, next)) { context.ranking = null; context.answers = []; }
         context.state = next;
       }
       return { summary: changed ? "Updated your taste profile" : "Your profile already matches these changes", value: { changed, state: context.state }, ...(changed ? { ops } : {}) };
@@ -172,14 +185,48 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
     case "get_ranking": {
       ToolArguments.get_ranking.parse(input);
       const neighborhoods = await getRanking(context);
-      return { summary: `Ranked ${neighborhoods.length} neighborhoods in ${context.state.city}`, value: { neighborhoods } };
+      return { summary: `Ranked ${neighborhoods.length} neighborhoods in ${context.state.city}`, value: { neighborhoods }, card: { kind: "ranking", neighborhoods: neighborhoods.slice(0, 3) } };
     }
     case "explain_neighborhood": {
       const { id } = ToolArguments.explain_neighborhood.parse(input);
-      const neighborhood = (await getRanking(context)).find((n) => n.id === id);
+      const neighborhood = (await getRanking(context)).find((n) => n.id === id || normalizeArea(n.name) === normalizeArea(id));
       if (!neighborhood) throw fail("not_found", "That neighborhood is not in the current ranking.", 404);
+      context.answers.push(neighborhoodReply(neighborhood));
       return { summary: `Checked why ${neighborhood.name} fits your taste`, value: { neighborhood } };
+    }
+    case "find_home": {
+      const source = ToolArguments.find_home.parse(input);
+      const result = await withSignal(findHome({ state: context.state, source, blend: 0 }), context.signal);
+      const card: AgentCard = { kind: "home", result };
+      context.answers.push(cardReply(card));
+      return { summary: `Compared ${source.neighborhood}, ${source.city} with ${context.state.city}`, value: result, card };
+    }
+    case "check_address": {
+      const { query } = ToolArguments.check_address.parse(input);
+      const result = await withSignal(checkSpot({ state: context.state, query }), context.signal);
+      const card: AgentCard = { kind: "spot", result };
+      context.answers.push(cardReply(card));
+      return { summary: `Checked ${result.label}`, value: result, card };
+    }
+    case "what_decides": {
+      ToolArguments.what_decides.parse(input);
+      const result = await withSignal(whatDecides(context.state), context.signal);
+      const card: AgentCard = { kind: "decides", result };
+      context.answers.push(cardReply(card));
+      return { summary: "Checked the ranking without each love", value: result, card };
+    }
+    case "get_places": {
+      const { neighborhood: query, categories } = ToolArguments.get_places.parse(input);
+      const ranking = await getRanking(context);
+      const neighborhood = query ? ranking.find((n) => n.id === query || normalizeArea(n.name) === normalizeArea(query))
+        : ranking.find((n) => n.id === context.state.neighborhood) ?? ranking[0];
+      if (!neighborhood) throw fail("not_found", "That neighborhood is not in the current ranking.", 404);
+      const places = await withSignal(placesNear(context.state, neighborhood, categories ?? ["food"]), context.signal);
+      context.answers.push(placesReply(neighborhood, places));
+      return { summary: `Found ${places.length} places in ${neighborhood.name}`, value: { neighborhood, places } };
     }
     default: throw fail("bad_input", "Unknown assistant tool.", 400);
   }
 }
+
+function normalizeArea(name: string): string { return name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().trim(); }

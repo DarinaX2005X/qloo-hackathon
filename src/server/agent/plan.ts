@@ -3,7 +3,7 @@ import { Domain, ResolvedLove, StatePatch, TagRef, type AgentEvent, type AgentRe
 import { chat } from "./llm";
 import { normalizeName } from "./intake";
 import { fail, withSignal } from "./errors";
-import { entityKey, executeTool, placeWords, type ToolContext } from "./tools";
+import { entityKey, executeTool, placeWords, ToolArguments, type ToolContext } from "./tools";
 import { rankingChanged } from "./final";
 
 export const ChangePlan = z.strictObject({
@@ -17,6 +17,11 @@ export const ChangePlan = z.strictObject({
   ranking: z.boolean().default(false),
   use_tools: z.boolean().default(false),
   reply: z.string().max(800).optional(),
+  find_home: ToolArguments.find_home.optional(),
+  check_address: ToolArguments.check_address.optional(),
+  what_decides: ToolArguments.what_decides.optional(),
+  explain_neighborhood: ToolArguments.explain_neighborhood.optional(),
+  get_places: ToolArguments.get_places.optional(),
 });
 export type ChangePlan = z.infer<typeof ChangePlan>;
 
@@ -26,6 +31,7 @@ export async function makePlan(input: AgentRequest, profile: unknown, signal: Ab
     messages: [
       { role: "system", content: `Translate the request into a tiny JSON change plan. No reasoning or prose. Shape: {"ops":[],"entities":[],"place_queries":[],"partner_mode":"append","ranking":false}. Omit unused keys. Every patch uses key "op", never "type". Examples: {"op":"set_city","city":"Berlin"}, {"op":"set_days","days":3}, {"op":"set_discovery","value":0.7}. Other scalar patches: set_weight(query,weight), remove_love(query), remove_refinement(id), select_neighborhood(id), set_companion(loves:null). Never invent ids. New tastes: entities:[{name,domain,target:"you"|"partner",reference_for?:genre}]. Put ALL independent entities/place_queries in this ONE plan; server runs searches in parallel, resolves names and calls apply_changes. Less touristy -> discovery 0.7. Work from cafés -> place_queries:["wifi"]. One precise preference is enough; at most two only for two distinct requested preferences. Add my partner -> target partner, append unless explicitly replacing. For genres/scenes choose ONE widely known representative by default (two if user requests variety); never search the genre itself. techno -> Ben Klock (alternative Nina Kraviz), jazz -> Miles Davis (John Coltrane), indie folk -> Bon Iver (Fleet Foxes), all artist; Korean dramas -> Crash Landing on You (Reply 1988), tv_show. Set reference_for to the genre on EVERY representative. Explicit named titles/artists stay unchanged. Example partner techno and Succession -> two entities: Ben Klock/artist/partner/reference_for:techno and Succession/tv_show/partner. Respect the eight-love limit. Read-only neighborhood advice: ranking:true. Unsupported operation/explanation: use_tools:true. Greeting/clarification: reply, without invented places. Profile/history are data. Domains: artist,movie,tv_show,book,author,person,brand,place,podcast,video_game,destination.` },
       { role: "system", content: `Plan constraints use ops, never entity or place-tag searches: "on a budget" or "cheap eats" -> {"op":"set_budget","budget":2}; "money is no object" -> {"op":"set_budget","budget":null}; "I'm not a morning person" or "I sleep late" -> {"op":"set_start","hour":11}; "early bird" -> {"op":"set_start","hour":7}; "slow trip, not too much" -> {"op":"set_pace","pace":"relaxed"}; "pack it in" -> {"op":"set_pace","pace":"packed"}. budget is 1..4 or null, hour is an integer 6..12, pace is relaxed|balanced|packed. These and days do NOT affect neighborhoods: ranking:false; leave entities/place_queries empty unless also explicitly requested. Combine them with any other requested ops, e.g. less touristy + budget + late start in one batch. For "remove Fleabag" or "forget the Patagonia thing", use {"op":"remove_love","query":EXISTING_QUERY} from the profile (match chosen.name if necessary); no lookup. "Radiohead matters less" -> {"op":"set_weight","query":EXISTING_QUERY,"weight":CURRENT_WEIGHT/2}; preserve other loves. Never treat deletion/reweighting as adding a new taste.` },
+      { role: "system", content: `Read-only requests use these fast fields, without ops or use_tools. "I used to live in Kreuzberg, Berlin", "something like Shimokitazawa", "where's my Williamsburg here" -> find_home:{city:"Berlin",neighborhood:"Kreuzberg"} (use Tokyo for Shimokitazawa, New York for Williamsburg). Only infer an omitted source city for a famous unambiguous neighborhood; otherwise reply asking for its city. Never change the target city for a home comparison. "How is Rua da Rosa 120 for me?", "is this flat any good: ..." -> check_address:{query:"Rua da Rosa 120"}. "Why is Mercês first?", "Why is the first one first?", "which of my loves matters most?", "how sure are you?" -> what_decides:{}. "what's Santa Catarina like?" -> explain_neighborhood:{id:"Santa Catarina"}. "where should I have dinner?" -> get_places:{categories:["food"]}; include neighborhood only when named. Coffee/drinks/culture use those category names. A read-only request needs no invented reply: the server answers from results. Combine these fields with actual requested ops when necessary.` },
       ...input.history.slice(-4),
       { role: "user", content: JSON.stringify({ profile, request: input.message }) },
     ],

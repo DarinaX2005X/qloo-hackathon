@@ -135,3 +135,54 @@ textarea:focus-visible {
   .hm-loader-mark path { animation: none; stroke-dashoffset: 0; }
   .hm-loader-dot { animation: none; transform: none; }
 }
+
+/* App shell: a pin for a checked address, with its label plate */
+.hm-pin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+.hm-pin-label {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--paper);
+  font: 560 13px/1.1 var(--font-sans);
+  letter-spacing: -0.01em;
+  box-shadow: var(--shadow-raised);
+  animation: hm-pin-in 420ms var(--ease-spring) both;
+}
+.hm-pin-stem {
+  width: 2px;
+  height: 22px;
+  background: var(--ink);
+  transform-origin: bottom;
+  animation: hm-stem-in 320ms var(--ease-out) both;
+}
+.hm-pin-dot {
+  width: 14px;
+  height: 14px;
+  margin-top: -2px;
+  margin-bottom: -7px;
+  border-radius: 999px;
+  background: var(--you);
+  border: 3px solid var(--paper-raised);
+  box-shadow: 0 0 0 1.5px var(--ink), var(--shadow-rest);
+}
+@keyframes hm-pin-in { from { opacity: 0; transform: translateY(8px) scale(0.92); } }
+@keyframes hm-stem-in { from { transform: scaleY(0); } }
+.maplibregl-canvas.hm-map-pick { cursor: crosshair !important; }
+
+/* App shell: the bottom tab bar respects the home indicator */
+.hm-safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+/* App shell: the screen layer lets clicks through to the map except on the screen's own panels */
+@layer components {
+  .hm-screen { pointer-events: none; }
+  .hm-screen > * { pointer-events: auto; }
+}

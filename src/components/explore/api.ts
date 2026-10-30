@@ -2,6 +2,9 @@ import type {
   AgentEvent,
   CityScore,
   ApiError,
+  DecidesResult,
+  HomeResult,
+  SpotResult,
   Category,
   Domain,
   EntityRef,
@@ -78,6 +81,11 @@ export const api = {
     call<{ places: Place[] }>("/api/places", { json: { ...s, neighborhoodId, categories }, signal }).then((r) => r.places),
   plan: (s: ExploreState, neighborhoodIds: string[], opts: { exclude?: string[]; include?: string[] } = {}, signal?: AbortSignal) =>
     call<Itinerary>("/api/plan", { json: { ...s, neighborhoodIds, exclude: opts.exclude ?? [], include: opts.include ?? [] }, signal }),
+  home: (s: ExploreState, source: { city: string; neighborhood: string; point?: [number, number] }, blend = 0, signal?: AbortSignal) =>
+    call<HomeResult>("/api/home", { json: { state: s, source, blend }, signal }),
+  spot: (s: ExploreState, where: { query?: string; point?: [number, number] }, signal?: AbortSignal) =>
+    call<SpotResult>("/api/spot", { json: { state: s, ...where }, signal }),
+  decides: (s: ExploreState, signal?: AbortSignal) => call<DecidesResult>("/api/decides", { json: s, signal }),
   cities: (s: ExploreState, cities: string[], signal?: AbortSignal) =>
     call<{ cities: CityScore[] }>("/api/cities", { json: { state: s, cities }, signal }).then((r) => r.cities),
 };
@@ -105,7 +113,16 @@ export async function streamAgent(
   const dec = new TextDecoder();
   let buf = "";
   for (;;) {
-    const { value, done } = await reader.read();
+    let chunkRead: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunkRead = await reader.read();
+    } catch (e) {
+      // the person pressed Stop: end quietly; anything else is a dropped connection
+      if ((e as Error).name !== "AbortError" && !signal?.aborted)
+        onEvent({ type: "error", error: { code: "llm_unavailable", message: "The connection dropped before the answer finished. Try again.", retryable: true } });
+      return;
+    }
+    const { value, done } = chunkRead;
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let i: number;

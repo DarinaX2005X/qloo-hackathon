@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowRight, Plus, X } from "lucide-react";
 import { activeLoves } from "@/shared/contracts";
@@ -10,52 +10,26 @@ import { CityPicker, cityName } from "@/components/ui/CityPicker";
 
 const CAT: Record<string, string> = { coffee: "coffee", food: "food", drinks: "drinks", culture: "culture", stay: "stay" };
 
-/** "Where should I go?" The same taste scored across up to five cities, with each city's best start. */
-export function CompareCities({ onClose }: { onClose: () => void }) {
+/** "Where should I go?" The same  taste scored across up to five cities, with each city's best start. */
+export function CityCompare({ onOpenCity }: { onOpenCity: (city: string) => void }) {
   const ex = useExplore();
   const [list, setList] = useState<string[]>(() => (ex.cities.asked.length ? ex.cities.asked : [ex.state.city, "Berlin", "Mexico City"].filter((c, i, a) => a.findIndex((x) => cityName(x).toLowerCase() === cityName(c).toLowerCase()) === i)));
   const [adding, setAdding] = useState("");
   const loves = activeLoves(ex.state.loves);
 
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
-
   const results = ex.cities.data;
   const best = results?.find((c) => !c.error);
   const top = Math.max(0.0001, ...(results ?? []).map((c) => c.score));
   return (
-    <motion.div
-      className="absolute inset-0 z-40 grid place-items-center bg-[oklch(23%_0.02_40/0.28)] p-4 backdrop-blur-[2px]"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <motion.div
-        role="dialog"
-        aria-label="Compare cities"
-        initial={{ opacity: 0, y: 24, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 16, scale: 0.98 }}
-        transition={{ type: "spring", stiffness: 360, damping: 32 }}
-        className="hm-scroll max-h-[calc(100dvh-48px)] w-full max-w-[980px] overflow-y-auto rounded-[28px] bg-paper-raised p-6 shadow-[var(--shadow-overlay)] ring-1 ring-line md:p-8"
-      >
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-[32px] font-[690] leading-tight tracking-[-0.03em]">Which city fits your taste</h2>
-            <p className="mt-2 max-w-[600px] text-[15px] text-ink-2">
-              Homing scores how strongly each city&apos;s places match {loves.length ? loves.map((l) => l.chosen.name).slice(0, 3).join(", ") : "what you love"}, and where you&apos;d start in each.
-            </p>
-          </div>
-          <button onClick={onClose} aria-label="Close" className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] text-ink-2 hover:bg-paper-sunk hover:text-ink">
-            <X size={18} />
-          </button>
-        </div>
+    <section aria-label="Compare cities">
+      <div>
+        <h2 className="text-[22px] font-[660] leading-tight tracking-[-0.02em]">Which city fits your taste</h2>
+        <p className="mt-1.5 text-[14px] leading-relaxed text-ink-2">
+          Homing scores how strongly each city&apos;s places match {loves.length ? loves.map((l) => l.chosen.name).slice(0, 3).join(", ") : "what you love"}, and where you&apos;d start in each.
+        </p>
+      </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-2">
+        <div className="mt-4 flex flex-wrap items-center gap-2">
           {list.map((c) => (
             <span key={c} className="flex h-10 items-center gap-1 rounded-[11px] bg-paper-sunk pl-3 pr-1 text-[14.5px] font-[560]">
               {cityName(c)}
@@ -68,7 +42,7 @@ export function CompareCities({ onClose }: { onClose: () => void }) {
             <div className="flex items-center gap-1.5">
               <CityPicker
                 key={list.length}
-                className="w-[230px]"
+                className="w-[210px]"
                 value={adding}
                 onChange={(c) => {
                   setList((l) => (l.some((x) => x.toLowerCase() === c.toLowerCase()) ? l : [...l, c]));
@@ -92,7 +66,7 @@ export function CompareCities({ onClose }: { onClose: () => void }) {
             </p>
           )}
           {ex.cities.loading && (
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-3 min-[1180px]:grid-cols-2">
               {ex.cities.asked.map((c) => (
                 <Skeleton key={c} className="h-[168px]" />
               ))}
@@ -111,7 +85,7 @@ export function CompareCities({ onClose }: { onClose: () => void }) {
                   .
                 </p>
               )}
-              <ol className="grid gap-3 md:grid-cols-2">
+              <ol className="grid gap-3 min-[1180px]:grid-cols-2">
                 <AnimatePresence>
                   {results.map((c, i) => (
                     <motion.li
@@ -147,10 +121,7 @@ export function CompareCities({ onClose }: { onClose: () => void }) {
                           )}
                           {c.sparse && <p className="mt-1.5 text-[12.5px] text-ink-3">Thin data for this city, treat the score as a rough hint.</p>}
                           <button
-                            onClick={() => {
-                              ex.patch([{ op: "set_city", city: c.city }]);
-                              onClose();
-                            }}
+                            onClick={() => onOpenCity(c.city)}
                             className="mt-3 flex items-center gap-1 text-[13.5px] font-[600] text-you-deep hover:underline"
                           >
                             Open the map of {cityName(c.city)} <ArrowRight size={14} />
@@ -167,7 +138,6 @@ export function CompareCities({ onClose }: { onClose: () => void }) {
             </>
           )}
         </div>
-      </motion.div>
-    </motion.div>
+    </section>
   );
 }

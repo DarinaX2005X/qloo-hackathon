@@ -124,15 +124,16 @@ export function matchesCategory(row: QlooRecord, category: Category): boolean {
     (category === "coffee" && ids.includes("urn:tag:genre:place:restaurant:cafe"));
 }
 
-export async function placesNear(state: ExploreState, neighborhood: Neighborhood, categories: Category[], fingerprint?: TagRef[]): Promise<Place[]> {
+export async function placesNear(state: ExploreState, neighborhood: Pick<Neighborhood, "center">, categories: Category[], fingerprint?: TagRef[], options: { radius?: number; take?: number; perCategory?: number } = {}): Promise<Place[]> {
+  const radius = options.radius ?? 900;
   const tags = fingerprint ?? (await buildFingerprint(state)).you;
   const requested = [...new Set(categories)];
   if (requested.some((category) => !CATEGORIES.includes(category))) throw apiError("bad_input", "Unknown place category.");
   const batches = await Promise.all(requested.map(async (category) => {
     const results = await Promise.all(CATEGORY_TAGS[category].map(async (tag) => {
       const response = await qlooGet("/v2/insights", { "filter.type": "urn:entity:place",
-        "filter.location": `POINT(${neighborhood.center[0]} ${neighborhood.center[1]})`, "filter.location.radius": 900,
-        "filter.tags": tag, ...signals([...state.loves, ...(state.companion?.loves ?? [])], state.refinements), take: 10,
+        "filter.location": `POINT(${neighborhood.center[0]} ${neighborhood.center[1]})`, "filter.location.radius": radius,
+        "filter.tags": tag, ...signals([...state.loves, ...(state.companion?.loves ?? [])], state.refinements), take: options.take ?? 10,
       });
       return resultRows(response, "entities");
     }));
@@ -147,9 +148,9 @@ export async function placesNear(state: ExploreState, neighborhood: Neighborhood
     const category = bestCategory(row);
     if (!category || !requested.includes(category)) return [];
     const place = placeFromRow(row, category, [...tags, ...state.refinements]);
-    return place && withinBudget(place, state.budget) && haversine(neighborhood.center, [place.lon, place.lat]) <= 900 ? [place] : [];
+    return place && withinBudget(place, state.budget) && haversine(neighborhood.center, [place.lon, place.lat]) <= radius ? [place] : [];
   });
-  return requested.flatMap((category) => found.filter((place) => place.category === category).sort(comparePlaces).slice(0, 10));
+  return requested.flatMap((category) => found.filter((place) => place.category === category).sort(comparePlaces).slice(0, options.perCategory ?? 10));
 }
 
 export async function findPlaces(state: ExploreState, neighborhoodId: string, categories: Category[] = [...CATEGORIES]): Promise<Place[]> {

@@ -1,18 +1,16 @@
 "use client";
 
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
-import { ArrowLeft, Bookmark, BookmarkCheck, CalendarPlus, Clock, Columns2, Copy, Footprints, RefreshCw, Shuffle } from "lucide-react";
-import { useState } from "react";
+import Link from "next/link";
+import { ArrowLeft, ArrowRight, Bookmark, BookmarkCheck, CalendarPlus, Clock, Columns2, RefreshCw } from "lucide-react";
 import type { Category, Neighborhood, Place } from "@/shared/contracts";
 import { activeLoves } from "@/shared/contracts";
 import { useExplore } from "./store";
 import { Button, Segmented, Skeleton, Spinner } from "@/components/ui/primitives";
 import { cityName } from "@/components/ui/CityPicker";
-import { download, itineraryToIcs, itineraryToText } from "@/lib/ics";
 import { LOVE_INKS } from "./inks";
 import { PlaceDrawer } from "./PlaceDrawer";
-import { HoodCompare } from "./HoodCompare";
-import { PlanSettings } from "./TripControls";
+import { useGoTo, useScreenHref } from "./nav";
 
 export { LOVE_INKS };
 
@@ -22,7 +20,7 @@ const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "frida
 const PRICE = ["", "$", "$$", "$$$", "$$$$"];
 const hhmm = (s: string) => s.replace(/^T/, "").slice(0, 5);
 
-function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
+export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div className="rounded-[14px] bg-[color-mix(in_oklch,var(--err)_7%,var(--paper-raised))] p-3.5 text-[14px] text-ink ring-1 ring-[color-mix(in_oklch,var(--err)_22%,transparent)]">
       <p>{message}</p>
@@ -74,6 +72,7 @@ function Legend({ order }: { order: string[] }) {
 
 function Ranking() {
   const ex = useExplore();
+  const href = useScreenHref();
   const pair = !!ex.state.companion && activeLoves(ex.state.companion.loves).length > 0;
   const { data, loading, error } = ex.hoods;
   const order = activeLoves(ex.state.loves).map((l) => l.chosen.name);
@@ -93,7 +92,21 @@ function Ranking() {
     ex.setCompare(ex.compare.includes(id) ? ex.compare.filter((x) => x !== id) : [...ex.compare, id].slice(-2));
   return (
     <LayoutGroup>
-      {cmp.length === 2 && <HoodCompare a={cmp[0]} b={cmp[1]} />}
+      {cmp.length === 2 && (
+        <Link
+          href={href("/explore/compare")}
+          scroll={false}
+          className="mb-3 flex items-center justify-between gap-2 rounded-[14px] bg-ink px-3.5 py-2.5 text-[14px] font-[560] text-paper shadow-[var(--shadow-raised)] transition-transform hover:-translate-y-px"
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <Columns2 size={15} className="shrink-0" />
+            <span className="truncate">
+              Compare {cmp[0].name} and {cmp[1].name} side by side
+            </span>
+          </span>
+          <ArrowRight size={15} className="shrink-0" />
+        </Link>
+      )}
       {cmp.length === 1 && <p className="mb-2 text-[12.5px] text-ink-3">Pick one more neighborhood to compare with {cmp[0].name}.</p>}
       {!pair && <Legend order={order} />}
       <ol className={`space-y-2 transition-opacity ${loading ? "opacity-60" : ""}`}>
@@ -157,7 +170,7 @@ function hoursToday(p: Place) {
   return spans.map((s) => `${hhmm(s.opens)}–${hhmm(s.closes)}`).join(", ");
 }
 
-function PlaceCard({ p }: { p: Place }) {
+export function PlaceCard({ p }: { p: Place }) {
   const ex = useExplore();
   const active = ex.activePlace === p.id;
   const saved = ex.isSaved(p.id);
@@ -230,7 +243,7 @@ function Detail({ n }: { n: Neighborhood }) {
         </div>
         <span className="tnum text-[34px] font-[680] leading-none tracking-[-0.03em] text-you">{Math.round(n.score * 100)}</span>
       </div>
-      <PlanButton />
+      <PlanEntry />
       <div className="mb-3 mt-4">
         {opts.length > 2 && <Segmented size="sm" label="Category" value={ex.category} onChange={(v) => ex.setCategory(v)} options={opts} />}
       </div>
@@ -254,140 +267,53 @@ function Detail({ n }: { n: Neighborhood }) {
   );
 }
 
-function PlanButton() {
+/** The short way into the plan from the Map screen; the full day-by-day timeline lives on the Trip screen. */
+function PlanEntry() {
   const ex = useExplore();
+  const goTo = useGoTo();
+  const plan = ex.plan.data;
+  const stops = plan?.days.reduce((n, d) => n + d.stops.length, 0) ?? 0;
   return (
     <div className="space-y-2">
-      <Button variant="primary" size="md" onClick={() => void ex.makePlan()} disabled={ex.plan.loading} className="w-full">
+      <Button
+        variant="primary"
+        size="md"
+        onClick={() => {
+          void ex.makePlan();
+          goTo("/explore/trip");
+        }}
+        disabled={ex.plan.loading}
+        className="w-full"
+      >
         {ex.plan.loading ? <Spinner size={15} /> : <CalendarPlus size={16} strokeWidth={1.9} />}
-        {ex.plan.data ? "Plan again" : "Plan my first days"}
+        {plan ? "Plan again" : "Plan my first days"}
       </Button>
-      <PlanSettings />
-    </div>
-  );
-}
-
-function PlanView() {
-  const ex = useExplore();
-  const [copied, setCopied] = useState(false);
-  const plan = ex.plan.data;
-  if (ex.plan.error) return <ErrorNote message={ex.plan.error.message} onRetry={() => void ex.makePlan()} />;
-  if (!plan) return null;
-  const edited = ex.exclude.length + ex.include.length > 0;
-  return (
-    <div className={`mt-5 transition-opacity ${ex.plan.loading ? "opacity-60" : ""}`}>
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-[20px] font-[650] tracking-[-0.02em]">Your first {plan.days.length > 1 ? `${plan.days.length} days` : "day"}</h3>
-        <div className="flex gap-1">
-          <Button size="sm" variant="quiet" onClick={() => download(`homing-${cityName(ex.state.city).toLowerCase().replace(/\s+/g, "-")}.ics`, itineraryToIcs(plan, cityName(ex.state.city)), "text/calendar")}>
-            <CalendarPlus size={14} /> Calendar
-          </Button>
-          <Button
-            size="sm"
-            variant="quiet"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(itineraryToText(plan, cityName(ex.state.city)));
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1600);
-              } catch {
-                ex.notify("Your browser blocked the clipboard. Use Calendar instead.");
-              }
-            }}
-          >
-            <Copy size={14} /> {copied ? "Copied" : "Copy"}
-          </Button>
-        </div>
-      </div>
-      {edited && <p className="-mt-1 mb-3 text-[12.5px] text-ink-3">Your edits are kept when you change days, pace or start time.</p>}
-      <div className="space-y-5">
-        {plan.days.map((d, di) => (
-          <section key={di}>
-            <p className="mb-2 text-[13px] font-[600] text-ink-2">
-              Day {di + 1}
-              {d.weekday ? `, ${d.weekday[0].toUpperCase()}${d.weekday.slice(1)}` : ""} in {d.neighborhood}
-            </p>
-            <ol className="relative ml-[22px] border-l-2 border-dashed border-line-strong pl-5">
-              <AnimatePresence initial={false}>
-                {d.stops.map((s, si) => (
-                  <motion.li
-                    data-testid="plan-stop"
-                    key={s.place.id}
-                    layout
-                    initial={{ opacity: 0, x: -8 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 8 }}
-                    transition={{ delay: ex.swapping ? 0 : 0.08 * (si + di * d.stops.length), duration: 0.32, ease: [0.2, 0.8, 0.2, 1] }}
-                    className="group relative pb-4 last:pb-0"
-                    onMouseEnter={() => ex.setActivePlace(s.place.id)}
-                    onMouseLeave={() => ex.setActivePlace(null)}
-                  >
-                    <span className="absolute -left-[31px] top-0.5 grid h-5 w-5 place-items-center rounded-full bg-paper-raised ring-2 ring-ink">
-                      <span className="h-1.5 w-1.5 rounded-full bg-you" />
-                    </span>
-                    {s.walkMin > 0 && (
-                      <span className="mb-1 flex items-center gap-1 text-[11.5px] text-ink-3">
-                        <Footprints size={12} /> {s.walkMin} min walk
-                      </span>
-                    )}
-                    <div className="flex items-baseline gap-2.5">
-                      <span className="tnum w-11 shrink-0 text-[14px] font-[620] text-ink">{s.time}</span>
-                      <button onClick={() => ex.setOpenPlace(s.place)} className="min-w-0 flex-1 text-left">
-                        <p className="truncate text-[15px] font-[580] text-ink hover:underline">{s.place.name}</p>
-                        <p className="text-[12.5px] text-ink-3">
-                          {s.slot}
-                          {s.hoursNote === "hours not listed" ? ", hours not listed" : ""}
-                          {ex.include.includes(s.place.id) ? ", your pick" : ""}
-                        </p>
-                      </button>
-                      <button
-                        onClick={() => void ex.swapStop(s.place.id)}
-                        disabled={ex.plan.loading}
-                        aria-label={`Swap ${s.place.name} for another place`}
-                        className="flex h-7 shrink-0 items-center gap-1 rounded-[8px] px-2 text-[12px] font-[560] text-ink-2 opacity-0 transition-opacity hover:bg-paper-sunk hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-40"
-                      >
-                        {ex.swapping === s.place.id ? <Spinner size={12} /> : <Shuffle size={13} />} Swap
-                      </button>
-                    </div>
-                  </motion.li>
-                ))}
-              </AnimatePresence>
-            </ol>
-            {d.missing.length > 0 && <p className="mt-2 text-[12.5px] text-ink-3">{d.missing.map((m) => (/[.:]/.test(m) ? m : `Nothing open nearby for ${m.toLowerCase()}.`)).join(" ")}</p>}
-          </section>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SavedList() {
-  const ex = useExplore();
-  if (!ex.saved.length)
-    return (
-      <div className="rounded-[16px] bg-paper-sunk/70 p-4 text-[14px] leading-relaxed text-ink-2">
-        <p className="font-[600] text-ink">Nothing saved in {cityName(ex.state.city)} yet</p>
-        <p className="mt-1">Tap the bookmark on any place to keep it here. Then plan your days around the places you picked.</p>
-      </div>
-    );
-  return (
-    <div>
-      <Button variant="primary" size="md" className="mb-3 w-full" disabled={ex.plan.loading || !ex.hoods.data?.length} onClick={() => void ex.planWithSaved()}>
-        {ex.plan.loading ? <Spinner size={15} /> : <CalendarPlus size={16} />} Plan around these {ex.saved.length}
-      </Button>
-      <div className="space-y-2">
-        {ex.saved.map((p) => (
-          <PlaceCard key={p.id} p={p} />
-        ))}
-      </div>
-      <PlanView />
+      {plan && (
+        <button
+          onClick={() => goTo("/explore/trip")}
+          className="group flex w-full items-center justify-between gap-3 rounded-[14px] bg-paper-sunk/70 px-3.5 py-2.5 text-left transition-colors hover:bg-paper-sunk"
+        >
+          <span className="min-w-0">
+            <span className="block text-[14px] font-[600] text-ink">
+              Your first {plan.days.length > 1 ? `${plan.days.length} days` : "day"}, {stops} stops
+            </span>
+            <span className="block truncate text-[12.5px] text-ink-2">
+              {plan.days.map((d) => d.neighborhood).filter((n, i, a) => a.indexOf(n) === i).join(", ")}, starting with {plan.days[0]?.stops[0]?.place.name ?? "a morning coffee"}
+            </span>
+          </span>
+          <span className="flex shrink-0 items-center gap-1 text-[13px] font-[600] text-you-deep">
+            Open <ArrowRight size={14} className="transition-transform group-hover:translate-x-0.5" />
+          </span>
+        </button>
+      )}
+      {ex.plan.error && <ErrorNote message={ex.plan.error.message} onRetry={() => void ex.makePlan()} />}
     </div>
   );
 }
 
 export function ResultsPanel() {
   const ex = useExplore();
-  const [tab, setTab] = useState<"hoods" | "saved">("hoods");
+  const href = useScreenHref();
   const n = ex.selected;
   const hasLoves = activeLoves(ex.state.loves).length > 0;
   const fieldErr = ex.field.error;
@@ -409,40 +335,33 @@ export function ResultsPanel() {
           ) : n ? (
             <motion.div key={`d-${n.id}`} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 24 }} transition={{ duration: 0.28, ease: [0.2, 0.8, 0.2, 1] }}>
               <Detail n={n} />
-              <PlanView />
             </motion.div>
           ) : (
             <motion.div key="rank" initial={{ opacity: 0, x: -24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }} transition={{ duration: 0.28, ease: [0.2, 0.8, 0.2, 1] }}>
-              <div className="mb-3">
-                <Segmented
-                  label="Results"
-                  value={tab}
-                  onChange={setTab}
-                  options={[
-                    { value: "hoods", label: "Neighborhoods" },
-                    { value: "saved", label: `Saved${ex.saved.length ? ` ${ex.saved.length}` : ""}` },
-                  ]}
-                />
+              <div className="mb-3 flex items-baseline justify-between gap-3">
+                <h2 className="text-[22px] font-[650] leading-tight tracking-[-0.02em]">Your neighborhoods</h2>
+                <span className="flex items-center gap-2">
+                  {ex.hoods.loading && <Spinner size={15} className="text-ink-3" />}
+                  {ex.saved.length > 0 && (
+                    <Link
+                      href={href("/explore/trip")}
+                      scroll={false}
+                      className="flex h-7 items-center gap-1 rounded-[8px] bg-paper-sunk px-2 text-[12.5px] font-[580] text-ink-2 hover:text-ink"
+                      title="Your shortlist is on the Trip screen"
+                    >
+                      <BookmarkCheck size={13} className="text-you" /> Saved {ex.saved.length}
+                    </Link>
+                  )}
+                </span>
               </div>
-              {tab === "saved" ? (
-                <SavedList />
-              ) : (
-                <>
-                  <div className="mb-3 flex items-baseline justify-between">
-                    <h2 className="text-[22px] font-[650] leading-tight tracking-[-0.02em]">Your neighborhoods</h2>
-                    {ex.hoods.loading && <Spinner size={15} className="text-ink-3" />}
-                  </div>
-                  {ex.field.data?.sparse && (
-                    <p className="mb-3 text-[13.5px] leading-snug text-ink-2">Qloo has thin taste data for {cityName(ex.state.city)}, so this ranking rests on fewer signals than usual.</p>
-                  )}
-                  <Ranking />
-                  {ex.hoods.data && ex.hoods.data.length > 0 && (
-                    <div className="mt-4">
-                      <PlanButton />
-                      <PlanView />
-                    </div>
-                  )}
-                </>
+              {ex.field.data?.sparse && (
+                <p className="mb-3 text-[13.5px] leading-snug text-ink-2">Qloo has thin taste data for {cityName(ex.state.city)}, so this ranking rests on fewer signals than usual.</p>
+              )}
+              <Ranking />
+              {ex.hoods.data && ex.hoods.data.length > 0 && (
+                <div className="mt-4">
+                  <PlanEntry />
+                </div>
               )}
             </motion.div>
           )}

@@ -1,11 +1,37 @@
 ﻿import type { AgentRequest, ExploreState, Neighborhood } from "@/shared/contracts";
 import { chat } from "./llm";
+import type { AgentCard, Place } from "@/shared/contracts";
 import { withSignal } from "./errors";
 import { normalizeName } from "./intake";
 
 export const FINAL_TIMEOUT_MS = 1_500;
 export const NO_CHANGES_REPLY = "I couldn’t apply those changes. Please rephrase what you’d like to change.";
 export type GenreReference = { taste: string; names: string[] };
+
+export function neighborhoodReply(neighborhood: Neighborhood): string {
+  const reasons = neighborhood.matchedTags.length ? ` Its places share ${neighborhood.matchedTags.slice(0, 3).join(", ")}.` : "";
+  const drivers = neighborhood.drivers.slice(0, 2).map((driver) => driver.love);
+  return `${neighborhood.name} is #${neighborhood.rank} in your ranking.${reasons}${drivers.length ? ` ${drivers.join(" and ")} contribute most to its fit.` : ""}`;
+}
+
+export function placesReply(neighborhood: Neighborhood, places: Place[]): string {
+  const picks = places.slice(0, 3);
+  return picks.length ? `In ${neighborhood.name}, try ${picks.map((place) => `${place.name}${place.why.length ? ` (${place.why.slice(0, 2).join(", ")})` : ""}`).join("; ")}.`
+    : `I couldn't find matching places in ${neighborhood.name} for those categories and settings.`;
+}
+
+/** Result cards use deterministic text so every number and place is traceable to the attached evidence. */
+export function cardReply(card: AgentCard): string {
+  if (card.kind === "spot") return card.result.verdict;
+  if (card.kind === "decides") return card.result.summary;
+  if (card.kind === "ranking") return card.neighborhoods[0] ? neighborhoodReply(card.neighborhoods[0]) : "There are no ranked neighborhoods for this taste yet.";
+  const { source, neighborhoods, matches } = card.result;
+  const best = neighborhoods[0];
+  const match = matches.find((item) => item.neighborhoodId === best?.id);
+  if (!best || !match) return `There are no ranked matches for ${source.neighborhood}, ${source.city} yet.`;
+  const twin = match.twins[0];
+  return `${best.name} is the closest ranked match to ${source.neighborhood}, ${source.city}, with a similarity score of ${match.similarity}/100.${match.sharedTags.length ? ` They share ${match.sharedTags.join(", ")}.` : ""}${twin ? ` ${twin.target.name} is a ${twin.target.category} counterpart to ${twin.source.name}.` : ""}`;
+}
 export type FinalFacts = {
   changes: string[];
   topNeighborhood: string | null;

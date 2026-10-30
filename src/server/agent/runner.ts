@@ -3,7 +3,7 @@ import { AgentRequest, type AgentEvent, type ExploreState } from "@/shared/contr
 import { asFailure, fail, withSignal } from "./errors";
 import { chat, type ChatMessage, type ToolCall } from "./llm";
 import { AGENT_TOOLS, createToolContext, entityKey, executeTool, type ToolContext, type ToolResult } from "./tools";
-import { completeDraft, finalFacts, finalReply, groundedReply, NO_CHANGES_REPLY, rankingChanged, type GenreReference } from "./final";
+import { cardReply, completeDraft, finalFacts, finalReply, groundedReply, NO_CHANGES_REPLY, rankingChanged, type GenreReference } from "./final";
 import { executePlan, makePlan } from "./plan";
 
 export const MAX_AGENT_STEPS = 8;
@@ -59,6 +59,7 @@ export async function runAgent(input: AgentRequest, emit: (event: AgentEvent) =>
   const context = createToolContext(parsed.state, signal);
   const messages: ChatMessage[] = [
     { role: "system", content: AGENT_SYSTEM_PROMPT }, ...parsed.history,
+    { role: "system", content: "Read-only questions require tools and no patches: find_home for an old neighborhood (infer an omitted city only for famous unambiguous places), check_address for a flat/address, what_decides for why the first area is first or confidence in the ranking. Use explain_neighborhood for what an area is like, get_places for dinner/coffee recommendations. These return grounded answers; finish after the requested read. Never invent place names or recommendation facts from history." },
     { role: "system", content: `Profile: ${JSON.stringify(compactProfile(context.state))}` },
     { role: "user", content: parsed.message },
   ];
@@ -67,18 +68,27 @@ export async function runAgent(input: AgentRequest, emit: (event: AgentEvent) =>
   let attemptedChanges = false;
   let completed = false;
   let draft = "";
+  let requestedRead = false;
   emit({ type: "trace", tool: "agent", summary: "Checking your preferences" });
   try {
     const plan = await makePlan(parsed, compactProfile(context.state), signal);
     if (plan) {
       const result = await executePlan(plan, context, emit);
       applied = result.applied;
+      const reads = (["find_home", "check_address", "what_decides", "explain_neighborhood", "get_places"] as const).filter((name) => plan[name]);
+      requestedRead = reads.length > 0;
       if (result.refresh) {
         const ranking = await safeTool({ id: "server-ranking", type: "function", function: { name: "get_ranking", arguments: "{}" } }, context);
-        if (!("failure" in ranking)) emit({ type: "trace", tool: "get_ranking", summary: ranking.summary });
+        if (!("failure" in ranking)) { emit({ type: "trace", tool: "get_ranking", summary: ranking.summary }); if (ranking.card) emit({ type: "card", card: ranking.card }); }
+      }
+      for (const name of reads) {
+        emit({ type: "trace", tool: name, summary: `Checking ${name === "find_home" ? "places like home" : name === "check_address" ? "that address" : name === "what_decides" ? "what decides the ranking" : "your neighborhood"}` });
+        const read = await executeTool(name, plan[name], context);
+        emit({ type: "trace", tool: name, summary: read.summary });
+        if (read.card) emit({ type: "card", card: read.card });
       }
       if (applied) draft = plan.reply ?? "";
-      else if (!result.refresh) { emit({ type: "delta", text: plan.reply ?? "The requested settings already match your profile." }); completed = true; }
+      else if (!result.refresh && !reads.length) { emit({ type: "delta", text: plan.reply ?? "The requested settings already match your profile." }); completed = true; }
     }
     for (let step = 0; !plan && step < MAX_AGENT_STEPS; step++) {
       const text: string[] = [];
@@ -93,11 +103,12 @@ export async function runAgent(input: AgentRequest, emit: (event: AgentEvent) =>
         }
       } finally { void iterator.return(undefined).catch(() => {}); }
       if (!calls.length) {
-        const answer = attemptedChanges ? NO_CHANGES_REPLY : text.join("").trim();
+        const answer = attemptedChanges ? NO_CHANGES_REPLY : context.ranking ? cardReply({ kind: "ranking", neighborhoods: context.ranking.slice(0, 3) }) : text.join("").trim();
         if (!answer) throw fail("llm_unavailable", "The assistant returned an empty reply.", 502, true);
         emit({ type: "delta", text: answer }); completed = true; break;
       }
       const allowed = calls.slice(0, MAX_AGENT_STEPS - executions);
+      requestedRead ||= allowed.some((call) => ["find_home", "check_address", "what_decides", "explain_neighborhood", "get_places"].includes(call.function.name));
       executions += allowed.length;
       messages.push({ role: "assistant", content: null, tool_calls: allowed });
       const searches = allowed.filter((call) => call.function.name === "search_entities" || call.function.name === "search_place_tags");
@@ -117,6 +128,7 @@ export async function runAgent(input: AgentRequest, emit: (event: AgentEvent) =>
           if (!results.has(call)) emit({ type: "trace", tool: call.function.name, summary: result.summary });
           if (call.function.name === "apply_changes") applySucceeded = true;
           if (result.ops) { applied = true; emit({ type: "patch", ops: result.ops }); }
+          if (result.card) emit({ type: "card", card: result.card });
         }
         messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify("failure" in result ? result.failure : result.value) });
       }
@@ -124,19 +136,23 @@ export async function runAgent(input: AgentRequest, emit: (event: AgentEvent) =>
         draft = text.join("").trim();
         if (rankingChanged(before, context.state)) {
           const ranking = await safeTool({ id: "server-ranking", type: "function", function: { name: "get_ranking", arguments: "{}" } }, context);
-          if (!("failure" in ranking)) emit({ type: "trace", tool: "get_ranking", summary: ranking.summary });
+          if (!("failure" in ranking)) { emit({ type: "trace", tool: "get_ranking", summary: ranking.summary }); if (ranking.card) emit({ type: "card", card: ranking.card }); }
         }
         break;
       }
+      if (context.answers.length) break;
       if (executions >= MAX_AGENT_STEPS) break;
     }
   } catch (error) {
-    if (parentSignal?.aborted || (!applied && !signal.aborted)) { clearTimeout(timer); throw asFailure(error); }
+    if (parentSignal?.aborted || (!applied && (!signal.aborted || requestedRead))) { clearTimeout(timer); throw asFailure(error); }
   }
   try {
     if (!completed) {
       const facts = finalFacts(parsed.state, context.state, context.ranking, appliedReferences(context));
-      if ((applied || context.ranking) && !signal.aborted && !draft) {
+      if (context.answers.length || (!applied && context.ranking)) {
+        const answer = context.answers.length ? context.answers.join(" ") : cardReply({ kind: "ranking", neighborhoods: context.ranking! });
+        if (!parentSignal?.aborted) emit({ type: "delta", text: `${applied ? `${groundedReply(facts)} ` : ""}${answer}` });
+      } else if ((applied || context.ranking) && !signal.aborted && !draft) {
         await finalReply(parsed, facts, signal, (text) => { if (!parentSignal?.aborted) emit({ type: "delta", text }); }, FAST_REPLY_TARGET_MS - (performance.now() - started));
       } else {
         const text = applied ? (draft ? completeDraft(draft, facts) : groundedReply(facts)) : NO_CHANGES_REPLY;

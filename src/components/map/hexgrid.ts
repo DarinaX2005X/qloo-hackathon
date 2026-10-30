@@ -1,6 +1,7 @@
 import type { FieldCell } from "@/shared/contracts";
 
-export type HexMode = "you" | "pair";
+/** "home" prints a borrowed field (Feels like home) in teal, so it never reads as the person's own taste */
+export type HexMode = "you" | "pair" | "home";
 
 /** Below this (city percentile) nothing is drawn: the terrain shows where taste concentrates, not the whole city. */
 export const FLOOR = 0.42;
@@ -43,6 +44,13 @@ const YOU_RAMP: [number, [number, number, number]][] = [
   [1, [160, 40, 28]],
 ];
 const THEM: [number, number, number] = [24, 146, 166];
+const HOME_RAMP: typeof YOU_RAMP = [
+  [0, [221, 236, 238]],
+  [0.35, [160, 210, 216]],
+  [0.65, [72, 162, 178]],
+  [0.85, [30, 128, 146]],
+  [1, [14, 86, 104]],
+];
 const BOTH: [number, number, number] = [118, 30, 40];
 const PAPER: [number, number, number] = [246, 241, 233];
 
@@ -65,6 +73,7 @@ const hex = (c: number[]) => "#" + c.map((v) => Math.round(Math.min(255, Math.ma
 /** Colour of a hex: vermilion ramp for one person; for two, inks overprint where both are strong. */
 export function hexColor(you: number, them: number, mode: HexMode) {
   if (mode === "you") return hex(ramp(YOU_RAMP, lift(you)));
+  if (mode === "home") return hex(ramp(HOME_RAMP, lift(you)));
   // Each ink keeps its own colour where it leads; where both are strong the inks overprint into oxblood.
   const yl = lift(you), tl = lift(them);
   const base = yl >= tl ? ramp(YOU_RAMP, yl) : mix(PAPER, THEM, 0.25 + tl * 0.75);
