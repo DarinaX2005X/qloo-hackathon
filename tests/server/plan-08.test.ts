@@ -82,7 +82,7 @@ describe('08 plan recovery and explicit reasons', () => {
     expect(placesNear).toHaveBeenCalledTimes(1);
     expect(vi.mocked(placesNear).mock.calls[0][2]).not.toContain('culture');
   });
-  it('caps recovery transport attempts even when an individual pool needs retries', async () => {
+  it('caps recovery caller charges even when an individual pool needs more calls', async () => {
     vi.mocked(rankNeighborhoods).mockResolvedValue(['A', 'B', 'C', 'D', 'E'].map(area));
     let calls = 0;
     vi.mocked(placesNear).mockImplementation(async (_s, _n, _c, _f, options) => {

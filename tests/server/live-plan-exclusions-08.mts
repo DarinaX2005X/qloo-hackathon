@@ -23,8 +23,8 @@ for (const city of ['Lisbon', 'Berlin']) {
   let qlooCalls = 0;
   await withQlooBudget(QLOO_REQUEST_LIMITS['/api/agent'], () => runAgent({ state, message, history: [] }, e => events.push(e)), used => { qlooCalls = used; });
   const itinerary = events.flatMap(e => e.type === 'card' && e.card.kind === 'plan' ? [e.card.itinerary] : []).at(-1);
-  log(`\n${city}: ${((performance.now() - started) / 1000).toFixed(2)}s; ${qlooCalls} outbound Qloo attempts; tools: ${events.flatMap(e => e.type === 'trace' ? [e.tool] : []).join(' → ')}`);
-  assert(qlooCalls > 0, 'Cold-city live check must exercise the shared transport counter');
+  log(`\n${city}: ${((performance.now() - started) / 1000).toFixed(2)}s; ${qlooCalls} Qloo caller charges (cache misses, including in-flight joins); tools: ${events.flatMap(e => e.type === 'trace' ? [e.tool] : []).join(' → ')}`);
+  assert(qlooCalls > 0, 'Cold-city live check must exercise the caller budget');
   if (!itinerary) log(`No plan returned. ${JSON.stringify(events.filter(e => e.type === 'error' || e.type === 'delta'))}`);
   assert(itinerary, `${city}: agent must return a plan card`);
   assert.equal(itinerary.days.length, 2, `${city}: requested two days`);

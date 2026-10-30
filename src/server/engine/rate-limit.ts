@@ -1,7 +1,8 @@
 import { apiError } from "@/shared/contracts";
 import { withQlooBudget } from "@/server/qloo/budget";
 
-/** Costs are enforced outbound-attempt ceilings, including retries, not unbounded estimates.
+/** Costs cap caller cache misses, including joins of shared in-flight work.
+ * Transport retries are bounded separately and do not charge any caller again.
  * A cold field is ~37 distinct calls at maximum profile size; places add up to 12 filters.
  * Plans add up to three initial pools and four recovery pools; cities/decides repeat ranking.
  */

@@ -21,7 +21,12 @@ export function remainingQlooCalls(): number {
   return budgets.length ? Math.min(...budgets.map(b => b.closed ? 0 : b.limit - b.used)) : Infinity;
 }
 
-/** Reserve synchronously before queueing transport work; concurrency cannot overspend. */
+/** Shared transport and its retries must not inherit the creating caller's budget. */
+export function withoutQlooBudget<T>(run: () => Promise<T>): Promise<T> {
+  return scope.exit(run);
+}
+
+/** Charge a cache miss before joining/creating shared work; concurrency cannot overspend. */
 export function consumeQlooCall(): void {
   const budgets = scope.getStore() ?? [];
   if (budgets.some(b => b.closed || b.used >= b.limit))

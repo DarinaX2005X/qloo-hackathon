@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ApiError, apiError } from "@/shared/contracts";
-import { consumeQlooCall } from "./budget";
+import { consumeQlooCall, withoutQlooBudget } from "./budget";
 
 export type QlooParams = Record<string, string | number | undefined>;
 export type QlooRecord = Record<string, unknown>;
@@ -80,7 +80,6 @@ export function releaseQlooSlot(): void {
 }
 
 export async function fetchQlooAttempt(url: URL, apiKey: string): Promise<{ status: number; value?: unknown }> {
-  consumeQlooCall();
   await acquireQlooSlot();
   try {
     const response = await fetch(url, {
@@ -153,13 +152,19 @@ export async function qlooGet(path: string, params: QlooParams): Promise<unknown
     return structuredClone(hit.value);
   }
   cache.delete(key);
+  // Charge each caller once, including coalesced waiters, before touching pending.
+  // A caller-local quota rejection must neither publish nor evict a shared task.
+  consumeQlooCall();
   let task = pending.get(key);
   if (!task) {
-    task = fetchQloo(url, apiKey).then((value) => {
+    task = withoutQlooBudget(() => fetchQloo(url, apiKey).then((value) => {
       cache.set(key, { value, expires: Date.now() + TTL * 1000 });
       if (cache.size > 500) cache.delete(cache.keys().next().value!);
       return value;
-    }).finally(() => { pending.delete(key); });
+    }).finally(() => {
+      // Failed tasks, including upstream quota failures, are never retained.
+      if (pending.get(key) === task) pending.delete(key);
+    }));
     pending.set(key, task);
   }
   return structuredClone(await task);
