@@ -2,15 +2,19 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { type Map as MLMap, type ExpressionSpecification } from "maplibre-gl";
-import type { FieldCell, Neighborhood, Place, TasteField } from "@/shared/contracts";
-import { buildHexes, focusCells, heightOf, type HexMode, type HexProps } from "./hexgrid";
+import type { FieldCell, Place, TasteField } from "@/shared/contracts";
+import { buildHexes, focusCells, heightOf, SUPPORT_FLOOR, type HexMode, type HexProps } from "./hexgrid";
+import { areaLabel, DEFAULT_RADIUS_M, type MapArea } from "./areas";
 import { firstLabelLayer, loadAtlasStyle } from "./style";
 import { CellCard } from "./CellCard";
 
 export type TerrainMapProps = {
   field: TasteField | null;
   mode?: HexMode;
-  neighborhoods?: Neighborhood[];
+  /** candidate areas in rank order; only the first `plates` (and the selected one) get a plate */
+  neighborhoods?: MapArea[];
+  /** how many numbered plates to draw; the rest stay in the list */
+  plates?: number;
   selectedId?: string | null;
   onSelectNeighborhood?: (id: string | null) => void;
   places?: Place[];
@@ -39,10 +43,16 @@ export type TerrainMapProps = {
   focus?: [number, number] | null;
   /** called once, when the field is on the map, the camera has settled and the tiles are in */
   onReady?: () => void;
+  /** start in full relief instead of the calm, low terrain (the work map has a toggle for it) */
+  relief?: boolean;
   className?: string;
 };
 
 const SRC = "terrain";
+/** calm by default: low columns and a gentle tilt keep labels and markers readable; relief is a toggle */
+const CALM = { scale: 0.32, pitch: 36 };
+const RELIEF = { scale: 1, pitch: 52 };
+const HERO = { scale: 0.42, pitch: 44 };
 const LAYER = "terrain-cols";
 const RISE_MS = 1100;
 const MORPH_MS = 420;
@@ -94,6 +104,7 @@ export function TerrainMap({
   field,
   mode = "you",
   neighborhoods = [],
+  plates = 3,
   selectedId = null,
   onSelectNeighborhood,
   places = [],
@@ -111,8 +122,13 @@ export function TerrainMap({
   flat = false,
   reframe = 0,
   onReady,
+  relief: reliefStart = false,
   className,
 }: TerrainMapProps) {
+  const [relief, setRelief] = useState(reliefStart);
+  const look = variant === "hero" ? HERO : relief ? RELIEF : CALM;
+  const lookRef = useRef(look);
+  lookRef.current = look;
   const el = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const [ready, setReady] = useState(false);
@@ -137,7 +153,7 @@ export function TerrainMap({
           style,
           center: field?.center ?? [-9.14, 38.72],
           zoom: 11.6,
-          pitch: variant === "hero" ? 54 : 48,
+          pitch: lookRef.current.pitch,
           bearing: -14,
           attributionControl: { compact: true },
           interactive: variant === "work",
@@ -183,6 +199,15 @@ export function TerrainMap({
             source: "ring",
             layout: { "line-cap": "round" },
             paint: { "line-color": "#c2412b", "line-width": 1.6, "line-opacity": 0.75, "line-dasharray": [2, 2] },
+          });
+          map.addSource("area", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+          map.addLayer({ id: "area-fill", type: "fill", source: "area", paint: { "fill-color": "#d6482f", "fill-opacity": 0.08 } }, before);
+          map.addLayer({
+            id: "area-line",
+            type: "line",
+            source: "area",
+            layout: { "line-cap": "round", "line-join": "round" },
+            paint: { "line-color": "#b8392a", "line-width": 2, "line-opacity": 0.85, "line-dasharray": [1.5, 1.6] },
           });
           map.addSource("places", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
           map.addLayer({
@@ -267,9 +292,9 @@ export function TerrainMap({
     const isRise = prev.size === 0;
     const next = new Map<string, number>();
     // inside a neighborhood the terrain lies down into a low carpet so places and streets stay readable
-    const scale = (variant === "hero" ? 1.15 : 1) * (selectedId || flat ? 0.04 : 1);
+    const scale = look.scale * (selectedId || flat ? 0.04 : 1);
     for (const f of hexes.features) {
-      const h1 = heightOf(f.properties.v, scale);
+      const h1 = heightOf(f.properties.v, scale) * (f.properties.s < SUPPORT_FLOOR ? 0.3 : 1);
       next.set(f.properties.id, h1);
       Object.assign(f.properties, { h0: prev.get(f.properties.id) ?? 0, h1 });
     }
@@ -293,7 +318,19 @@ export function TerrainMap({
     };
     anim.current = requestAnimationFrame(tick);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hexes, ready, variant, !!selectedId || flat]);
+  }, [hexes, ready, variant, !!selectedId || flat, look.scale]);
+
+  // --- relief toggle: tilt with the terrain so tall columns never hide the streets head-on
+  const firstLook = useRef(true);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    if (firstLook.current) {
+      firstLook.current = false;
+      return;
+    }
+    map.easeTo({ pitch: look.pitch, duration: 600 });
+  }, [look.pitch, ready]);
 
   // --- camera: frame the strongest part of the field once per city
   useEffect(() => {
@@ -302,17 +339,27 @@ export function TerrainMap({
     const key = field.city.toLowerCase();
     if (fittedFor.current === key) return;
     fittedFor.current = key;
+    userMoved.current = false;
+    // the areas are already known (a prepared scene): frame them straight away
+    if (!selectedId && !flat && neighborhoods.some((n) => n.rank <= plates) && fitTop(everFitted.current ? 1400 : 0)) {
+      framedTop.current = key;
+      everFitted.current = true;
+      return;
+    }
     // the first frame jumps straight to the field so its tiles load at once; later cities fly
-    map.fitBounds(fieldBounds(focused), { padding: extraPadding(map, padding), pitch: variant === "hero" ? 54 : 48, bearing: -14, duration: everFitted.current ? 1400 : 0, maxZoom: 13.6 });
+    map.fitBounds(fieldBounds(focused), { padding: extraPadding(map, padding), pitch: look.pitch, bearing: -14, duration: everFitted.current ? 1400 : 0, maxZoom: 13.6 });
     everFitted.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [field, ready]);
 
+  // the day route, when the terrain is laid down for a plan
+  const routeKey = flat && route && route.length > 1 ? JSON.stringify(route) : null;
   // --- back to the whole field on request (a screen that zoomed in to a spot or a route has closed)
   useEffect(() => {
     const map = mapRef.current;
-    if (!ready || !map || !field || !reframe) return;
-    map.fitBounds(fieldBounds(focused), { padding: extraPadding(map, padding), pitch: 48, bearing: -14, duration: 1300, maxZoom: 13.6 });
+    // a route on screen keeps its own framing
+    if (!ready || !map || !field || !reframe || routeKey) return;
+    map.fitBounds(fieldBounds(focused), { padding: extraPadding(map, padding), pitch: look.pitch, bearing: -14, duration: 1300, maxZoom: 13.6 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reframe]);
 
@@ -325,8 +372,11 @@ export function TerrainMap({
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map || !hexes || told.current || !onReadyRef.current) return;
+    const since = performance.now();
     const iv = window.setInterval(() => {
-      if (fittedFor.current && !map.isMoving() && map.areTilesLoaded()) {
+      // the terrain is drawn and framed; basemap tiles get a short grace period, then they finish in place
+      const tiles = map.areTilesLoaded() || performance.now() - since > 900;
+      if (fittedFor.current && !map.isMoving() && tiles) {
         told.current = true;
         window.clearInterval(iv);
         onReadyRef.current?.();
@@ -356,18 +406,20 @@ export function TerrainMap({
     return () => cancelAnimationFrame(raf);
   }, [ready, variant]);
 
-  // --- neighborhood plates
+  // --- area plates: the first three by rank and the selected one; the full list lives in the panel
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map) return;
     markers.current.forEach((m) => m.remove());
-    markers.current = neighborhoods.slice(0, 8).map((n) => {
+    const shown = neighborhoods.filter((n) => n.rank <= plates || n.id === selectedId);
+    markers.current = shown.map((n) => {
       const node = document.createElement("button");
       node.type = "button";
       node.className = `hm-plate${n.id === selectedId ? " is-selected" : ""}${selectedId && n.id !== selectedId ? " is-dim" : ""}`;
       node.innerHTML = `<span class="hm-plate-rank">${n.rank}</span><span class="hm-plate-name"></span>`;
-      (node.querySelector(".hm-plate-name") as HTMLElement).textContent = n.name;
-      node.setAttribute("aria-label", `${n.rank}. ${n.name}`);
+      const label = areaLabel(n.name, n.approximate);
+      (node.querySelector(".hm-plate-name") as HTMLElement).textContent = label;
+      node.setAttribute("aria-label", `${n.rank}. ${label}`);
       node.style.zIndex = String(n.id === selectedId ? 100 : 50 - n.rank);
       if (variant === "work") node.addEventListener("click", () => onSelectNeighborhood?.(n.id === selectedId ? null : n.id));
       else node.tabIndex = -1;
@@ -378,34 +430,104 @@ export function TerrainMap({
       const kept: DOMRect[] = [];
       markers.current.forEach((m, i) => {
         const node = m.getElement();
-        const n = neighborhoods[i];
+        const n = shown[i];
         node.classList.remove("is-collapsed", "is-hidden");
         const overlaps = (r: DOMRect) => kept.some((k) => r.left < k.right + 4 && r.right > k.left - 4 && r.top < k.bottom + 2 && r.bottom > k.top - 2);
         if (n.id === selectedId || !overlaps(node.getBoundingClientRect())) return void kept.push(node.getBoundingClientRect());
         node.classList.add("is-collapsed");
-        // still colliding as a bare number: lower ranks step aside, the list keeps them
-        if (overlaps(node.getBoundingClientRect()) && n.rank > 3) node.classList.add("is-hidden");
-        else kept.push(node.getBoundingClientRect());
+        kept.push(node.getBoundingClientRect());
       });
     };
-    declutter();
-    map.on("moveend", declutter);
-    return () => {
-      map.off("moveend", declutter);
+    // markers get their screen position on the next frame; measure then, and again whenever the camera rests
+    let raf = requestAnimationFrame(declutter);
+    const later = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(declutter);
     };
-  }, [neighborhoods, selectedId, ready, variant, onSelectNeighborhood]);
+    map.on("moveend", later);
+    map.once("idle", later);
+    return () => {
+      cancelAnimationFrame(raf);
+      map.off("moveend", later);
+      map.off("idle", later);
+    };
+  }, [neighborhoods, selectedId, ready, variant, onSelectNeighborhood, plates]);
 
-  // --- fly to the selected neighborhood, dim the rest of the terrain
+  // --- the selected area's walkable circle
+  const sel = neighborhoods.find((n) => n.id === selectedId) ?? null;
+  const selKey = sel ? `${sel.center[0]},${sel.center[1]},${sel.radiusM ?? DEFAULT_RADIUS_M}` : "";
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map) return;
-    const sel = neighborhoods.find((n) => n.id === selectedId);
+    (map.getSource("area") as maplibregl.GeoJSONSource | undefined)?.setData({
+      type: "FeatureCollection",
+      features: sel
+        ? [{ type: "Feature", geometry: { type: "Polygon", coordinates: [circle(sel.center[0], sel.center[1], sel.radiusM ?? DEFAULT_RADIUS_M)] }, properties: {} }]
+        : [],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selKey, ready]);
+
+  // --- frame the first areas once per city, so the answer (not the whole metro field) fills the view.
+  // Later reorders (a weight change) leave the camera where the person put it.
+  const framedTop = useRef<string | null>(null);
+  /** the person dragged, zoomed or rotated the map themselves; after that Homing does not reframe it on its own */
+  const userMoved = useRef(false);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const mark = (e: { originalEvent?: unknown }) => {
+      if (e.originalEvent) userMoved.current = true;
+    };
+    map.on("dragstart", mark);
+    map.on("zoomstart", mark);
+    map.on("rotatestart", mark);
+    return () => {
+      map.off("dragstart", mark);
+      map.off("zoomstart", mark);
+      map.off("rotatestart", mark);
+    };
+  }, [ready]);
+  const fitTop = (duration: number) => {
+    const map = mapRef.current;
+    const top = neighborhoods.filter((n) => n.rank <= plates);
+    if (!map || !top.length) return false;
+    // a margin of streets around the circles keeps the areas in their city, not floating in a close-up
+    const pts = top.flatMap((n) => circle(n.center[0], n.center[1], (n.radiusM ?? DEFAULT_RADIUS_M) * 3.2, 16));
+    const lons = pts.map((p) => p[0]), lats = pts.map((p) => p[1]);
+    map.fitBounds(
+      [
+        [Math.min(...lons), Math.min(...lats)],
+        [Math.max(...lons), Math.max(...lats)],
+      ],
+      { padding: extraPadding(map, padding), pitch: look.pitch, bearing: -14, duration, maxZoom: 13.4 },
+    );
+    return true;
+  };
+  const cityKey = field?.city.toLowerCase() ?? null;
+  const hasTop = neighborhoods.some((n) => n.rank <= plates);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map || !cityKey || !hasTop || selectedId || flat || framedTop.current === cityKey) return;
+    // wait for the field's own fit (it sets fittedFor) so the two moves do not fight
+    if (fittedFor.current !== cityKey) return;
+    if (fitTop(everFitted.current ? 1200 : 0)) framedTop.current = cityKey;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cityKey, hasTop, ready, selectedId, flat, field]);
+
+  // --- fly to the selected area, dim the rest of the terrain; closing it returns to the first areas
+  const hadSel = useRef(false);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
     if (sel) {
-      map.flyTo({ center: sel.center, zoom: 14.2, pitch: 56, duration: 1300, padding, essential: true });
+      map.flyTo({ center: sel.center, zoom: 14.2, pitch: Math.max(look.pitch, 44), duration: 1300, padding, essential: true });
       map.setPaintProperty(LAYER, "fill-extrusion-opacity", 0.12);
     } else {
       map.setPaintProperty(LAYER, "fill-extrusion-opacity", flat ? 0.22 : 0.94);
+      if (hadSel.current && !flat) fitTop(1100);
     }
+    hadSel.current = !!sel;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, ready, flat]);
 
@@ -449,8 +571,13 @@ export function TerrainMap({
       firstPad.current = false;
       return;
     }
-    // never cut a flight short (a new city or a neighborhood being framed): shift once it lands
-    const shift = () => map.easeTo({ padding, duration: 650, easing: (t) => 1 - Math.pow(1 - t, 3) });
+    // never cut a flight short (a new city or a neighborhood being framed): shift once it lands.
+    // While the camera still shows the first three areas as Homing framed them (a phone sheet went from peek to
+    // results, a panel opened), frame them again for the new space; a camera the person moved only slides.
+    const shift = () => {
+      if (!userMoved.current && framedTop.current && !sel && !routeKey && fitTop(650)) return;
+      map.easeTo({ padding, duration: 650, easing: (t) => 1 - Math.pow(1 - t, 3) });
+    };
     if (!map.isMoving()) {
       shift();
       return;
@@ -489,18 +616,29 @@ export function TerrainMap({
   }, [pin?.lon, pin?.lat, pin?.label, ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- with the terrain laid down for a plan, frame the route of the day
-  const routeKey = flat && route && route.length > 1 ? JSON.stringify(route) : null;
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map || !routeKey || !route) return;
     const lons = route.map((p) => p[0]), lats = route.map((p) => p[1]);
-    map.fitBounds(
-      [
-        [Math.min(...lons), Math.min(...lats)],
-        [Math.max(...lons), Math.max(...lats)],
-      ],
-      { padding: extraPadding(map, padding), pitch: 52, maxZoom: 15.6, duration: 1300 },
-    );
+    // a margin past the panels, so a stop never lands on the very edge of the visible map
+    const M = 44;
+    const fit = () =>
+      map.fitBounds(
+        [
+          [Math.min(...lons), Math.min(...lats)],
+          [Math.max(...lons), Math.max(...lats)],
+        ],
+        { padding: extraPadding(map, { top: padding.top + M, bottom: padding.bottom + M, left: padding.left + M, right: padding.right + M }), pitch: 52, maxZoom: 15.6, duration: 1100 },
+      );
+    // a new route (a swapped or removed stop) always gets the last word over a camera move still running
+    if (!map.isMoving()) {
+      fit();
+      return;
+    }
+    map.once("moveend", fit);
+    return () => {
+      map.off("moveend", fit);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeKey, ready]);
 
@@ -520,6 +658,23 @@ export function TerrainMap({
         <div className="absolute inset-0 grid place-items-center bg-paper-sunk text-ink-2">
           <p className="max-w-xs text-center text-[15px]">The map tiles didn&apos;t load. Your results below still work.</p>
         </div>
+      )}
+      {variant === "work" && !failed && !!field && (
+        <button
+          type="button"
+          onClick={() => setRelief((r) => !r)}
+          aria-pressed={relief}
+          title={relief ? "Lay the columns down so streets and markers read" : "Raise the columns to see where the signal peaks"}
+          style={{ bottom: Math.max(12, padding.bottom - 28), right: Math.max(12, padding.right - 28) }}
+          className="absolute z-10 flex h-9 items-center gap-2 rounded-[11px] bg-paper-raised/95 px-3 text-[13px] font-[560] text-ink-2 shadow-[var(--shadow-rest)] ring-1 ring-line backdrop-blur transition-colors hover:text-ink"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden fill="currentColor">
+            <rect x="1.5" y={relief ? 8 : 10.5} width="3" height={relief ? 6.5 : 4} rx="1" />
+            <rect x="6.5" y={relief ? 2 : 8.5} width="3" height={relief ? 12.5 : 6} rx="1" />
+            <rect x="11.5" y={relief ? 5 : 9.5} width="3" height={relief ? 9.5 : 5} rx="1" />
+          </svg>
+          {relief ? "Flatten" : "Relief"}
+        </button>
       )}
       {hover && variant === "work" && <CellCard x={hover.x} y={hover.y} cell={hover.cell} loveNames={loveNames} pair={mode === "pair"} />}
     </div>

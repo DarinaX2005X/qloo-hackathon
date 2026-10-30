@@ -58,6 +58,14 @@ describe('08 public demo limits and city validation', () => {
       : Response.json({ results: [{ name: 'Fake Place', country: 'France', latitude: 0, longitude: 0, feature_code: 'PPLX' }] }));
     await expect(validateCity('Fake Place')).rejects.toMatchObject({ error: { code: 'not_found' } });
   });
+  it('prefers the city over a village namesake and respects an explicit region', async () => {
+    fetcher.mockImplementation(async input => String(input).includes('photon')
+      ? Response.json({ features: [{ geometry: { coordinates: [2.1, 43.2] }, properties: { name: 'Montréal', country: 'France', osm_key: 'place', osm_value: 'village' } }] })
+      : Response.json({ results: [{ name: 'Montréal', country: 'Canada', admin1: 'Quebec', latitude: 45.5, longitude: -73.6, population: 1600000, feature_code: 'PPLA2' }] }));
+    expect((await validateCity('Montréal')).center).toEqual([-73.6, 45.5]);
+    expect((await validateCity('Montréal, France')).center).toEqual([2.1, 43.2]);
+    await expect(validateCity('Montréal, Australia')).rejects.toMatchObject({ error: { code: 'not_found' } });
+  });
   it.each(['city', 'town', 'village'])('accepts a real %s and caches validation per city', async type => {
     fetcher.mockImplementation(async input => String(input).includes('photon')
       ? Response.json({ features: [{ geometry: { coordinates: [0, 0] }, properties: { name: 'Valid Place', country: 'France', osm_key: 'place', osm_value: type } }] })

@@ -94,9 +94,9 @@ export function loveSeries(maps: LoveMap[], retained: Set<string>): LoveSeries[]
 }
 
 /**
- * Per-love lift against Qloo's population popularity, stabilized with one city-median
+ * Legacy per-love heuristic against Qloo's signal-dependent popularity, stabilized with one city-median
  * pseudo-observation. The median cell has lift zero; small denominators cannot explode.
- * Percentiles are only for mixing heterogeneous love signals, never a displayed similarity.
+ * This is not a population correction. Percentiles mix signals and are never displayed similarity.
  */
 export function baselineSeries(cells: HeatCell[], retained: Set<string>): { ranks: Map<string, number>; lifts: Map<string, number> } {
   const local = cells.filter(cell => retained.has(cell.h) && cell.affinity > 0);

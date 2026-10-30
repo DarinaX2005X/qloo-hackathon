@@ -19,6 +19,16 @@ export type HexProps = {
   color: string;
   /** strongest source cell, for hover details */
   cell: string;
+  /** 0..1 share of the active loves observed around this hex; low support prints pale, never as a dark gap */
+  s: number;
+};
+
+/** Below this support a hex is printed pale: limited data, not a weak taste. */
+export const SUPPORT_FLOOR = 0.5;
+/** Per-cell support when the backend sends it (v2 `fieldSupport`); older fields count as fully observed. */
+export const supportOf = (c: FieldCell) => {
+  const v = (c as FieldCell & { support?: number }).support;
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
 };
 
 export type HexFeature = GeoJSON.Feature<GeoJSON.Polygon, HexProps>;
@@ -70,6 +80,12 @@ function ramp(stops: typeof YOU_RAMP, t: number): [number, number, number] {
 const mix = (a: number[], b: number[], k: number) => a.map((v, i) => v + (b[i] - v) * k);
 const hex = (c: number[]) => "#" + c.map((v) => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, "0")).join("");
 
+/** A hex with limited data: the same ink, washed most of the way back to paper. */
+function paleColor(c: string) {
+  const n = parseInt(c.slice(1), 16);
+  return hex(mix([(n >> 16) & 255, (n >> 8) & 255, n & 255], PAPER, 0.7));
+}
+
 /** Colour of a hex: vermilion ramp for one person; for two, inks overprint where both are strong. */
 export function hexColor(you: number, them: number, mode: HexMode) {
   if (mode === "you") return hex(ramp(YOU_RAMP, lift(you)));
@@ -107,7 +123,7 @@ export function buildHexes(cells: FieldCell[], opts: BuildOpts = {}): GeoJSON.Fe
   const pts = cells.map((c) => {
     const [x, y] = P.fwd(c.lon, c.lat);
     const them = c.them ?? 0;
-    return { x, y, you: c.you, them, h: c.h };
+    return { x, y, you: c.you, them, h: c.h, s: supportOf(c) };
   });
 
   const [w, s, e, n] = opts.bbox ?? [
@@ -136,7 +152,7 @@ export function buildHexes(cells: FieldCell[], opts: BuildOpts = {}): GeoJSON.Fe
   const dx = Math.sqrt(3) * radius;
   const dy = 1.5 * radius;
   const inner = radius * 0.86; // small gap between columns so they read as a printed grid
-  const raw: { cx: number; cy: number; you: number; them: number; cell: string }[] = [];
+  const raw: { cx: number; cy: number; you: number; them: number; cell: string; s: number }[] = [];
   let row = 0;
   for (let cy = y0 - dy; cy <= y1 + dy; cy += dy, row++) {
     for (let cx = x0 - dx + (row % 2 ? dx / 2 : 0); cx <= x1 + dx; cx += dx) {
@@ -144,14 +160,15 @@ export function buildHexes(cells: FieldCell[], opts: BuildOpts = {}): GeoJSON.Fe
       if (!cand.length) continue;
       const scored = cand.map((p) => ({ p, d2: (p.x - cx) ** 2 + (p.y - cy) ** 2 })).sort((a, b) => a.d2 - b.d2).slice(0, 4);
       if (scored[0].d2 > 900 ** 2) continue; // outside the data, no fake terrain
-      let ws = 0, you = 0, them = 0;
+      let ws = 0, you = 0, them = 0, sup = 0;
       for (const { p, d2 } of scored) {
         const wgt = 1 / Math.max(d2, 400);
         ws += wgt;
         you += p.you * wgt;
         them += p.them * wgt;
+        sup += p.s * wgt;
       }
-      raw.push({ cx, cy, you: you / ws, them: them / ws, cell: scored[0].p.h });
+      raw.push({ cx, cy, you: you / ws, them: them / ws, cell: scored[0].p.h, s: sup / ws });
     }
   }
 
@@ -181,8 +198,9 @@ export function buildHexes(cells: FieldCell[], opts: BuildOpts = {}): GeoJSON.Fe
         both,
         v: val(r),
         d: Math.hypot(r.cx - top.cx, r.cy - top.cy) / maxDist,
-        color: hexColor(r.you, r.them, mode),
+        color: r.s < SUPPORT_FLOOR ? paleColor(hexColor(r.you, r.them, mode)) : hexColor(r.you, r.them, mode),
         cell: r.cell,
+        s: r.s,
       },
     };
   });

@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { ArrowLeft, Bookmark, BookmarkCheck, CalendarPlus, ExternalLink, Globe, MapPin } from "lucide-react";
+import { ArrowLeft, Ban, Bookmark, BookmarkCheck, CalendarPlus, ExternalLink, Globe, MapPin } from "lucide-react";
 import type { Category, Place } from "@/shared/contracts";
 import { useExplore } from "./store";
+import { genreLabel } from "@/components/screens/venue";
 import { Button } from "@/components/ui/primitives";
 
 const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
@@ -17,8 +19,23 @@ export function PlaceDrawer({ place }: { place: Place }) {
   const saved = ex.isSaved(place.id);
   const inPlan = !!ex.plan.data?.days.some((d) => d.stops.some((s) => s.place.id === place.id));
   const today = DAYS[(new Date().getDay() + 6) % 7];
+  const v2 = place as Place & { primaryGenre?: string; closed?: boolean };
+  const genre = genreLabel(v2.primaryGenre);
+  const kind = genre && genre.toLowerCase() !== CAT[place.category].toLowerCase() ? `${CAT[place.category]} · ${genre}` : CAT[place.category];
+  const [left, setLeft] = useState(false);
+  // opened from a long list: start at the top of the place, not where the list was scrolled
+  const top = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      let el = top.current?.parentElement ?? null;
+      while (el && !/(auto|scroll)/.test(getComputedStyle(el).overflowY)) el = el.parentElement;
+      if (el) el.scrollTop = 0;
+    });
+    return () => cancelAnimationFrame(id);
+  }, []);
   return (
     <motion.div
+      ref={top}
       key={place.id}
       initial={{ opacity: 0, x: 28 }}
       animate={{ opacity: 1, x: 0 }}
@@ -32,19 +49,17 @@ export function PlaceDrawer({ place }: { place: Place }) {
         // eslint-disable-next-line @next/next/no-img-element
         <img src={place.image} alt="" className="mb-4 h-[190px] w-full rounded-[18px] object-cover shadow-[var(--shadow-rest)]" />
       )}
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-[26px] font-[680] leading-tight tracking-[-0.025em]">{place.name}</h3>
-          <p className="mt-1 text-[13.5px] text-ink-2">
-            {CAT[place.category]}
-            {place.priceLevel ? `, ${PRICE[place.priceLevel]}` : ""}
-            {place.neighborhood ? ` in ${place.neighborhood}` : ""}
-          </p>
-        </div>
-        <span className="tnum shrink-0 rounded-[10px] bg-you-soft px-2.5 py-1 text-[17px] font-[680] text-you-deep" title="How strongly people with your taste rate it">
-          {Math.round(place.affinity * 100)}
-        </span>
-      </div>
+      {/* what kind of place it is comes before anything said about it */}
+      <p data-testid="place-kind" className="text-[12px] font-[600] uppercase tracking-[0.05em] text-ink-3">
+        {kind}
+        {place.neighborhood ? ` · ${place.neighborhood}` : ""}
+      </p>
+      <h3 className="mt-1 text-[26px] font-[680] leading-tight tracking-[-0.025em]">{place.name}</h3>
+      <p className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[13px] text-ink-2">
+        <span>{place.priceLevel ? `Price ${PRICE[place.priceLevel]}` : "Price not listed"}</span>
+        <span>{place.hours && Object.keys(place.hours).length ? "Hours listed below" : "Hours not listed"}</span>
+        {v2.closed && <span className="font-[600] text-err">Marked closed</span>}
+      </p>
 
       {place.why.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1">
@@ -68,6 +83,16 @@ export function PlaceDrawer({ place }: { place: Place }) {
           {saved ? <BookmarkCheck size={16} className="text-you" /> : <Bookmark size={16} />} {saved ? "Saved" : "Save"}
         </Button>
       </div>
+      <button
+        onClick={() => {
+          ex.removePlace(place.id);
+          setLeft(true);
+        }}
+        disabled={left}
+        className="mt-2 flex min-h-9 items-center gap-1.5 rounded-[10px] px-1 text-[13px] font-[560] text-ink-2 hover:text-ink disabled:text-ink-3"
+      >
+        <Ban size={14} /> {left ? "Left out of your plans and suggestions" : "Leave this place out"}
+      </button>
 
       {place.hours && Object.keys(place.hours).length > 0 && (
         <div className="mt-5">

@@ -1,13 +1,75 @@
 import { describe, expect, it } from "vitest";
-import { categoryRuleLabel, tagRuleLabel, crowdFromPopularity, crowdOf, CROWD_LABEL, gridText, matchIndex, matchPhrase, stopReasonLines, twinSharedTag, walkText } from "@/lib/honest";
+import {
+  categoryRuleLabel,
+  tagRuleLabel,
+  crowdFromPopularity,
+  crowdOf,
+  CROWD_LABEL,
+  gridText,
+  legacyMetrics,
+  metricExplainer,
+  metricHeadline,
+  metricNote,
+  metricState,
+  overlapText,
+  percentileText,
+  rankText,
+  stopReasonLines,
+  twinSharedTag,
+  walkText,
+  type MetricInput,
+} from "@/lib/honest";
 import { dayNoteLines, reasonText } from "@/lib/explain";
 
-describe("Match index", () => {
-  it("is the ordering score on a 0-100 scale, below 50 shown as it is", () => {
-    expect(matchPhrase(0.5365)).toBe("Match 54");
-    expect(matchPhrase(0.459)).toBe("Match 46");
-    expect(matchIndex(0)).toBe(0);
-    expect(matchIndex(undefined)).toBeNull();
+const m = (o: Partial<MetricInput> = {}): MetricInput => ({ rank: 1, candidateCount: 16, percentile: 97, tieBand: false, support: { quality: "sufficient" }, ...o });
+
+describe("Area metric", () => {
+  it("leads with the rank among the areas checked", () => {
+    expect(rankText(m())).toBe("#1 of 16 areas checked");
+    expect(rankText(m({ rank: 3 }), true)).toBe("#3 of 16");
+    expect(rankText({ rank: 2, candidateCount: 0 })).toBe("#2");
+  });
+  it("shows a percentile only with enough support and at least five areas, never as Match", () => {
+    expect(percentileText(m({ percentile: 85 }))).toBe("Top 15% of checked areas");
+    expect(percentileText(m({ percentile: 85 }), true)).toBe("Ahead of about 85% of the areas checked for your taste");
+    expect(percentileText(m({ candidateCount: 4 }))).toBeNull();
+    expect(percentileText(m({ support: { quality: "limited" } }))).toBeNull();
+    expect(percentileText(m({ percentile: null }))).toBeNull();
+    expect(percentileText(m({ percentile: 30 }))).toBeNull();
+    for (const p of [0, 46, 85, 99]) expect(percentileText(m({ percentile: p })) ?? "").not.toMatch(/match|alike|probab/i);
+  });
+  it("puts limited data before a close call before a plain rank", () => {
+    expect(metricState(m({ tieBand: true, support: { quality: "limited" } }))).toBe("limited");
+    expect(metricNote(m({ tieBand: true, support: { quality: "limited" } }))).toBe("Limited data");
+    expect(metricNote(m({ tieBand: true }))).toBe("About level with the next area");
+    expect(metricNote(m({ rank: 2, tieBand: true }))).toBe("About level with its neighbors in the list");
+    expect(metricNote(m({ percentile: 90 }))).toBe("Top 10% of checked areas");
+  });
+  it("names the shortlist by its real state", () => {
+    expect(metricHeadline([m(), m({ rank: 2 })])).toBe("Start with these areas");
+    expect(metricHeadline([m({ tieBand: true }), m({ rank: 2, tieBand: true })])).toBe("Several close options");
+    expect(metricHeadline([m({ support: { quality: "limited" } })])).toBe("Limited data for this taste");
+    expect(metricHeadline([])).toBe("No areas checked yet");
+  });
+  it("adapts a legacy neighborhood to its rank only", () => {
+    const legacy = legacyMetrics({ rank: 2 }, [1, 2, 3]);
+    expect(rankText(legacy)).toBe("#2 of 3 areas checked");
+    expect(metricNote(legacy)).toBeNull();
+  });
+  it("defines the number with its denominator and without a probability claim", () => {
+    const t = metricExplainer({ city: "Lisbon", candidateCount: 16 });
+    expect(t).toContain("16 areas in Lisbon");
+    expect(t).toMatch(/not a probability/);
+  });
+});
+
+describe("Home overlap", () => {
+  it("is an index out of 100 with its method, and hidden when support is limited", () => {
+    expect(overlapText({ value: 41.6, method: "style_music_v1", support: "sufficient" })).toBe("Cultural-profile overlap 42/100");
+    expect(overlapText({ value: 41.6, method: "style_only_v1", support: "sufficient" })).toBe("Style overlap 42/100");
+    expect(overlapText({ value: 41.6, method: "style_music_v1", support: "limited" })).toBeNull();
+    expect(overlapText({ value: null })).toBeNull();
+    expect(overlapText({ value: 88 }) ?? "").not.toMatch(/%|alike/);
   });
 });
 

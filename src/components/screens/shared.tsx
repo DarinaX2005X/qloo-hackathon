@@ -5,7 +5,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { RefreshCw } from "lucide-react";
 import { useExplore, type MapOverlay } from "@/components/explore/store";
+import { neighborhoodFromArea } from "@/components/explore/adapt";
+import type { AreaDecision } from "@/shared/contracts-09";
+import type { Neighborhood } from "@/shared/contracts";
 import { Button } from "@/components/ui/primitives";
+import type { AreaActions } from "./decision";
 
 export function useIsMobile() {
   const [m, setM] = useState(false);
@@ -42,6 +46,41 @@ export function useSelectNeighborhood() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [ex.hoods.data, ex.patch],
   );
+}
+
+/** The checked areas of the current analysis, in rank order (empty until the first answer). */
+export function useAreas(): AreaDecision[] {
+  const ex = useExplore();
+  return ex.analysis.data?.areas ?? [];
+}
+
+/** Map plates for areas shown on a screen (the map still draws `Neighborhood` plates), ranked in the order given. */
+export function platesOf(areas: AreaDecision[]): Neighborhood[] {
+  return areas.map((a, i) => ({ ...neighborhoodFromArea(a), rank: i + 1 }));
+}
+
+/**
+ * The three actions on a chosen area, the same on every screen: see its places on the map, check an address there,
+ * try it with a short visit. Selecting works for areas of the current analysis; a Home match outside it opens the map
+ * at its centre instead.
+ */
+export function useAreaActions(): Required<AreaActions> {
+  const ex = useExplore();
+  const goTo = useGoTo();
+  return {
+    onOpen: (a) => {
+      if (ex.analysis.data?.areas.some((x) => x.area.id === a.area.id) || ex.hoods.data?.some((n) => n.id === a.area.id)) ex.patch([{ op: "select_neighborhood", id: a.area.id }]);
+      goTo("/explore");
+    },
+    onCheckAddress: (a) => {
+      if (ex.analysis.data?.areas.some((x) => x.area.id === a.area.id)) ex.patch([{ op: "select_neighborhood", id: a.area.id }]);
+      goTo("/explore/address");
+    },
+    onTry: (a) => {
+      void ex.buildVisit(a.area.id);
+      goTo("/explore/trip");
+    },
+  };
 }
 
 /** Goes to the Map screen with the state as it is, so an opened neighborhood shows its places. */

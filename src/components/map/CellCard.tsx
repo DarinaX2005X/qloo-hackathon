@@ -1,5 +1,5 @@
 import type { FieldCell } from "@/shared/contracts";
-import { CROWD_LABEL, crowdFromPopularity, MATCH_EXPLAINER, MATCH_LABEL, matchIndex } from "@/lib/honest";
+import { SUPPORT_FLOOR, supportOf } from "./hexgrid";
 
 const DOMAIN_LABEL: Record<string, string> = {
   artist: "music",
@@ -15,12 +15,15 @@ const DOMAIN_LABEL: Record<string, string> = {
   destination: "travel",
 };
 
-/** Popularity only, in the same words as the neighborhoods: never residents versus visitors. */
-export function crowdLabel(popularity: number) {
-  return `Crowd: ${CROWD_LABEL[crowdFromPopularity(popularity)]}`;
+/** Words for a cell's place on this map. The value is a rank among the map's own cells, so it is said as a band, not a number. */
+function band(v: number) {
+  if (v >= 0.85) return "Among the strongest on this map";
+  if (v >= 0.65) return "Stronger than most of this map";
+  if (v >= 0.4) return "About average for this map";
+  return "Weaker than most of this map";
 }
 
-/** Floating explanation of one terrain column: its taste lift, what drives it, how busy it is. */
+/** Floating note for one terrain column: how strong the cultural signal is here, what carries it, how much data there is. */
 export function CellCard({
   x,
   y,
@@ -39,23 +42,20 @@ export function CellCard({
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3);
   const total = drivers.reduce((s, [, v]) => s + v, 0) || 1;
+  const limited = supportOf(cell) < SUPPORT_FLOOR;
   return (
     <div
-      className="pointer-events-none absolute z-20 w-[232px] rounded-[14px] bg-paper-raised p-3 text-[13px] leading-snug shadow-[var(--shadow-overlay)]"
+      className="pointer-events-none absolute z-20 w-[240px] rounded-[14px] bg-paper-raised p-3 text-[13px] leading-snug shadow-[var(--shadow-overlay)]"
       style={{ left: Math.min(x + 16, (typeof window !== "undefined" ? window.innerWidth : 1400) - 260), top: Math.max(8, y - 120) }}
     >
-      <div className="flex items-baseline justify-between gap-2" title={MATCH_EXPLAINER}>
-        <span className="font-[600] text-ink">{pair ? `Your ${MATCH_LABEL.toLowerCase()}` : MATCH_LABEL}</span>
-        <span className="tnum text-[20px] font-[650] tracking-[-0.02em] text-you-deep">{matchIndex(cell.you)}</span>
-      </div>
-      {pair && cell.them !== undefined && (
-        <div className="mt-0.5 flex items-baseline justify-between text-ink-2">
-          <span>Their {MATCH_LABEL.toLowerCase()}</span>
-          <span className="tnum font-[600] text-them">{matchIndex(cell.them)}</span>
-        </div>
+      <p className="text-[12px] font-[560] text-ink-3">{pair ? "Your cultural signal here" : "Cultural signal here"}</p>
+      <p className="mt-0.5 font-[620] text-ink">{limited ? "Limited data here" : band(cell.you)}</p>
+      {pair && cell.them !== undefined && !limited && (
+        <p className="mt-1 text-ink-2">
+          <span className="font-[560] text-them">Theirs:</span> {band(cell.them).toLowerCase()}
+        </p>
       )}
-      <p className="mt-0.5 text-[11.5px] text-ink-3">This map cell, 0 to 100; 50 is neutral</p>
-      {drivers.length > 0 && (
+      {drivers.length > 0 && !limited && (
         <ul className="mt-2 space-y-1">
           {drivers.map(([d, v]) => (
             <li key={d} className="flex items-center gap-2">
@@ -65,7 +65,7 @@ export function CellCard({
           ))}
         </ul>
       )}
-      <p className="mt-2 text-ink-3">{crowdLabel(cell.popularity)}</p>
+      {limited && <p className="mt-1 text-ink-2">Too few of your loves have data around this spot to say how it compares.</p>}
     </div>
   );
 }

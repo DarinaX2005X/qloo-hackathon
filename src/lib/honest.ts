@@ -1,30 +1,105 @@
 import type { Neighborhood } from "@/shared/contracts";
 
-// ---------------------------------------------------------------- Match
-// Neighborhoods are ordered by `score`, and the number people see is the same score on a 0-100 scale:
-// "Match 54". 50 is neutral, so a whole ranking can sit below 50. One word everywhere: "Match".
+// ---------------------------------------------------------------- Area metric (stage 09)
+// The one number people see for an area is its place in the list of areas checked: "#1 of 16 areas checked".
+// A percentile is added only when the backend allows it (enough support, at least 5 supported areas),
+// and it is a percentile of the checked areas, never a "Match" or a probability. The internal taste score
+// is never formatted for people. Every screen renders area numbers through these helpers and
+// components/ui/Metric.tsx, so the wording and the rules live in one place.
 
-export const MATCH_LABEL = "Match";
+export type Quality = "sufficient" | "limited" | "unavailable";
 
-/** 0..100, rounded. Null when there is no score. */
-export function matchIndex(score: number | null | undefined): number | null {
-  if (score === undefined || score === null || !Number.isFinite(score)) return null;
-  return Math.max(0, Math.min(100, Math.round(score * 100)));
+/** What the renderer needs from B's `AreaMetrics` (structural, so the v2 type and the legacy adapter both fit). */
+export type MetricInput = {
+  rank: number;
+  candidateCount: number;
+  /** 0..100 share of checked areas ranked below this one; null when hidden by the backend */
+  percentile: number | null;
+  /** true when this area is practically level with its neighbors in the ranking */
+  tieBand: boolean;
+  support?: { quality: Quality } | null;
+};
+
+const PERCENTILE_MIN_AREAS = 5;
+
+/** "#1 of 16 areas checked"; "#1" alone when the count is unknown. */
+export function rankText(m: Pick<MetricInput, "rank" | "candidateCount">, short = false): string {
+  const rank = Math.max(1, Math.round(m.rank));
+  if (!(m.candidateCount >= rank)) return `#${rank}`;
+  return short ? `#${rank} of ${m.candidateCount}` : `#${rank} of ${m.candidateCount} areas checked`;
 }
 
-/** "Match 54". */
-export function matchPhrase(score: number | null | undefined): string | null {
-  const m = matchIndex(score);
-  return m === null ? null : `${MATCH_LABEL} ${m}`;
+/** Whether the percentile may be shown at all. */
+export function showsPercentile(m: MetricInput): boolean {
+  if (m.percentile === null || !Number.isFinite(m.percentile)) return false;
+  if (m.candidateCount < PERCENTILE_MIN_AREAS) return false;
+  if (m.support && m.support.quality !== "sufficient") return false;
+  return true;
 }
 
-/** The meaning of the number, on hover and behind "What Match means". */
-export const MATCH_EXPLAINER =
-  "Your taste's signal here on a 0–100 scale, where 50 is neutral; it accounts for how busy the area is and, for two people, the less happy of you. Neighborhoods are ordered by this number. It is not a probability.";
+/** "Top 15% of checked areas" (short) or "Ahead of about 85% of the areas checked for your taste" (long). Null when hidden. */
+export function percentileText(m: MetricInput, long = false): string | null {
+  if (!showsPercentile(m)) return null;
+  const p = Math.max(0, Math.min(100, Math.round(m.percentile as number)));
+  if (long) return `Ahead of about ${p}% of the areas checked for your taste`;
+  const top = Math.max(1, 100 - p);
+  if (top > 50) return null; // "Top 70%" says nothing useful; the rank already says it
+  return `Top ${top}% of checked areas`;
+}
 
-/** Under a ranked list where no area reaches neutral (the backend sends rankingNote). */
-export const BELOW_NEUTRAL_NOTE =
-  "None of the mapped areas stands out for this taste with these settings; try fewer loves or turn the crowd dial.";
+export type MetricState = "ranked" | "close" | "limited";
+/** One state per area: limited data wins over a close call, which wins over a plain rank. */
+export function metricState(m: MetricInput): MetricState {
+  if (m.support && m.support.quality !== "sufficient") return "limited";
+  if (m.tieBand) return "close";
+  return "ranked";
+}
+
+/** The second, quiet line under the rank. */
+export function metricNote(m: MetricInput): string | null {
+  const s = metricState(m);
+  if (s === "limited") return m.support?.quality === "unavailable" ? "No data for this area yet" : "Limited data";
+  if (s === "close") return m.rank === 1 ? "About level with the next area" : "About level with its neighbors in the list";
+  return percentileText(m);
+}
+
+/** The heading over a shortlist. */
+export function metricHeadline(list: MetricInput[]): string {
+  if (!list.length) return "No areas checked yet";
+  const top = [...list].sort((a, b) => a.rank - b.rank)[0];
+  const supported = list.filter((m) => !m.support || m.support.quality === "sufficient").length;
+  if (supported === 0) return "Limited data for this taste";
+  if (top.tieBand) return "Several close options";
+  return "Start with these areas";
+}
+
+/** The definition behind the number, for the expandable note. */
+export function metricExplainer(opts: { city?: string; candidateCount?: number; searchArea?: string } = {}): string {
+  const where = opts.city ? ` in ${opts.city}` : "";
+  const n = opts.candidateCount ? `${opts.candidateCount} areas` : "the areas";
+  const area = opts.searchArea ?? "the central search area";
+  return `Homing compares ${n}${where}, each a walkable circle inside ${area}, by how strongly your loves show up in Qloo's cultural signal there. "#1 of ${opts.candidateCount ?? "N"}" is a place in that list. When a percentage is shown, it is the share of those same areas ranked below this one. It is not a probability that you will like living there.`;
+}
+
+/** Today's `Neighborhood` as a metric input: the neutral rank only, never its score. */
+export function legacyMetrics(n: Pick<Neighborhood, "rank">, all?: readonly unknown[] | null): MetricInput {
+  return { rank: n.rank, candidateCount: all?.length ?? 0, percentile: null, tieBand: false, support: null };
+}
+
+// ---------------------------------------------------------------- Home overlap (Feels like home)
+
+export type SimilarityInput = { value: number | null; method?: string; support?: Quality };
+
+/** "Cultural-profile overlap 42/100" or "Style overlap 42/100"; null when there is no number to show. */
+export function overlapText(s: SimilarityInput | null | undefined): string | null {
+  if (!s || s.value === null || !Number.isFinite(s.value)) return null;
+  if (s.support && s.support !== "sufficient") return null;
+  const v = Math.max(0, Math.min(100, Math.round(s.value)));
+  return `${s.method?.startsWith("style_only") ? "Style overlap" : "Cultural-profile overlap"} ${v}/100`;
+}
+
+export const OVERLAP_EXPLAINER =
+  "How much the two neighborhoods share the distinctive styles of their places and the music Qloo links to them, from 0 to 100. Common words every area has count for little. It is not the share of people who would feel at home, and the closest area can still be a weak match.";
 
 // ---------------------------------------------------------------- Crowd
 // Popularity only: never a claim about residents or visitors.
@@ -100,6 +175,7 @@ export function quotaText(what = "this") {
 
 // ---------------------------------------------------------------- Feels like home
 
+/** @deprecated legacy Home label; v2 renders overlapText. */
 export const SIMILARITY_LABEL = "taste-tag similarity";
 /** Words almost every area carries; a counterpart is better described by a tag that says more. */
 const BROAD_TAGS = new Set(["casual", "modern", "lively", "popular", "trendy", "friendly"]);

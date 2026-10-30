@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, CalendarPlus, Copy, Footprints, Plus, Shuffle, X } from "lucide-react";
+import { ArrowRight, CalendarPlus, ChevronDown, Copy, Footprints, Plus, Route, Shuffle, X } from "lucide-react";
 import type { Itinerary, Place } from "@/shared/contracts";
 import { activeLoves } from "@/shared/contracts";
 import { useExplore } from "./store";
@@ -12,7 +12,12 @@ import { cityName } from "@/components/ui/CityPicker";
 import { download, itineraryToIcs, itineraryToText } from "@/lib/ics";
 import { dayNoteLines } from "@/lib/explain";
 import { categoryRuleLabel, stopReasonLines, tagRuleLabel, walkText } from "@/lib/honest";
-import { MatchValue } from "@/components/ui/Match";
+import { AreaRank } from "@/components/ui/Metric";
+import { ConstraintChips, dedupe, ruleKey } from "@/components/agent09/Constraints";
+import { RecoveryLog, VisitAudit, VisitStops, visitAreaNames, visitStops } from "@/components/agent09/Visit";
+import { useAgentStore } from "@/components/agent09/useAgentStore";
+import type { Constraint } from "@/components/agent09/types";
+import { constraintLabel } from "@/lib/explain";
 import { ErrorNote, PlaceCard } from "./ResultsPanel";
 import { PlaceDrawer } from "./PlaceDrawer";
 import { PlanSettings } from "./TripControls";
@@ -116,7 +121,7 @@ function Timeline() {
   if (!plan) return null;
   const edited = ex.exclude.length + ex.include.length > 0;
   const city = cityName(ex.state.city);
-  const scoreOf = (name: string) => ex.hoods.data?.find((n) => n.name === name)?.score;
+  const areaOf = (name: string) => ex.analysis.data?.areas.find((a) => a.area.name === name);
   return (
     <div className={`transition-opacity ${ex.plan.loading ? "opacity-60" : ""}`}>
       <div className="mb-2 flex items-center justify-between">
@@ -138,10 +143,10 @@ function Timeline() {
                   <span className="block text-[12.5px] leading-snug text-ink-2">
                     In {d.neighborhood}
                     {d.stops.length ? `, ${d.stops.length} ${d.stops.length === 1 ? "stop" : "stops"}` : ", no stops"}
-                    {scoreOf(d.neighborhood) !== undefined && (
+                    {areaOf(d.neighborhood) && (
                       <>
                         {" \u00b7 "}
-                        <MatchValue score={scoreOf(d.neighborhood)} size="sm" />
+                        <AreaRank metrics={areaOf(d.neighborhood)!.metrics} size="sm" note={false} />
                       </>
                     )}
                   </span>
@@ -253,11 +258,9 @@ function PlanPanel() {
   const hasLoves = activeLoves(ex.state.loves).length > 0;
   const hoods = ex.hoods.data ?? [];
   const first = ex.selected ?? hoods[0];
-  const city = cityName(ex.state.city);
-  if (ex.openPlace) return <PlaceDrawer key={`p-${ex.openPlace.id}`} place={ex.openPlace} />;
   return (
     <div>
-      <h2 className="text-[24px] font-[680] leading-tight tracking-[-0.025em]">Your first days in {city}</h2>
+      <p className="text-[13.5px] leading-relaxed text-ink-2">A longer plan of one to three days, starting from your shortlist.</p>
       {!hasLoves ? (
         <div className="mt-2 space-y-3 text-[14.5px] leading-relaxed text-ink-2">
           <p>A plan starts from the neighborhoods that fit your taste. Add a few things you love on the Map screen first, and Homing will plan your days there.</p>
@@ -304,7 +307,7 @@ function SavedPanel() {
   return (
     <div>
       <div className="mb-3 flex items-baseline justify-between gap-2">
-        <h2 className="text-[20px] font-[650] leading-tight tracking-[-0.02em]">Saved in {city}</h2>
+        <h2 className="sr-only">Saved in {city}</h2>
         {ex.saved.length > 0 && <span className="tnum text-[13px] text-ink-3">{ex.saved.length}</span>}
       </div>
       {!ex.saved.length ? (
@@ -328,48 +331,278 @@ function SavedPanel() {
   );
 }
 
-/** Trip: the plan as a day-by-day timeline next to the shortlist, with the route of the chosen day on the map. */
-export function TripScreen() {
+/** Rules a person can add in one tap; each is a hard rule the walk and the assistant keep. */
+const QUICK_RULES: Constraint[] = [
+  { id: "ui:no-bars", kind: "exclude_type", value: "bars", strength: "hard", source: "user" },
+  { id: "ui:no-museums", kind: "exclude_type", value: "museums", strength: "hard", source: "user" },
+  { id: "ui:budget-2", kind: "budget", value: 2, strength: "hard", source: "user" },
+  { id: "ui:vegetarian", kind: "dietary", value: "vegetarian", strength: "hard", source: "user" },
+];
+
+/** The rules this walk keeps, removable, plus a few one-tap rules to add. */
+function VisitRules() {
+  const ex = useAgentStore();
+  const list = dedupe(ex.constraints ?? []);
+  const names = Object.fromEntries((ex.visit?.data ? visitStops(ex.visit.data) : []).map((st) => [st.place.id, st.place.name]));
+  const add = QUICK_RULES.filter((q) => !list.some((c) => ruleKey(c) === ruleKey(q)));
+  if (!ex.setConstraint) return null;
+  return (
+    <section className="mt-3" data-testid="visit-rules">
+      {list.length > 0 ? (
+        <ConstraintChips
+          constraints={list}
+          names={names}
+          label="Kept every time you plan again"
+          onRemove={ex.removeConstraint ? (c) => ex.removeConstraint!(c.id) : undefined}
+          disabled={ex.visit?.loading}
+        />
+      ) : (
+        <p className="text-[12.5px] font-[560] text-ink-3">No rules yet. Add one and every plan, swap and assistant answer keeps it.</p>
+      )}
+      {add.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {add.map((q) => (
+            <button
+              key={q.id}
+              onClick={() => ex.setConstraint!(q)}
+              disabled={ex.visit?.loading}
+              className="flex h-8 items-center gap-1 rounded-[9px] bg-paper-sunk px-2.5 text-[13px] font-[520] text-ink-2 transition-colors hover:bg-[color-mix(in_oklch,var(--you)_12%,var(--paper-sunk))] hover:text-ink disabled:opacity-50"
+            >
+              <Plus size={13} /> {constraintLabel(q)}
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** When the walk starts: the same area at another time of day, the rules and the current stops kept where they still fit. */
+const TIMES = [
+  { value: "10", label: "Morning" },
+  { value: "14", label: "Afternoon" },
+  { value: "18", label: "Evening" },
+] as const;
+type TimeValue = (typeof TIMES)[number]["value"];
+const nearestTime = (h: number | undefined): TimeValue => {
+  const x = h ?? 14;
+  return TIMES.reduce((best, t) => (Math.abs(Number(t.value) - x) < Math.abs(Number(best.value) - x) ? t : best), TIMES[1] as (typeof TIMES)[number]).value;
+};
+
+/** "Try this neighborhood": one calm walk of three or four places in an area from the shortlist (§13.4). */
+function VisitPanel() {
+  const ex = useAgentStore();
+  const href = useScreenHref();
+  const [swapping, setSwapping] = useState<string | null>(null);
+  const v = ex.visit;
+  const areas = ex.analysis.data?.areas ?? [];
+  const hasLoves = activeLoves(ex.state.loves).length > 0;
+  const current = v?.areaIds[0] ?? ex.state.neighborhood ?? areas[0]?.area.id ?? null;
+  const area = areas.find((a) => a.area.id === current) ?? null;
+  const name = area?.area.name ?? (v?.data ? visitAreaNames(v.data)[0] : null) ?? null;
+  const top = areas.slice(0, 3);
+  const choices = area && !top.includes(area) ? [...top, area] : top;
+  if (!v || !ex.buildVisit) return null;
+  const build = (id: string) => void ex.buildVisit!(id, id === v.areaIds[0] ? { excludeIds: v.excludeIds } : {});
+  const run = async (fn: ((id: string) => Promise<void>) | undefined, id: string) => {
+    if (!fn) return;
+    setSwapping(id);
+    try {
+      await fn(id);
+    } finally {
+      setSwapping(null);
+    }
+  };
+  const stops = v.data ? visitStops(v.data) : [];
+  const dayAreas = v.data ? visitAreaNames(v.data) : [];
+  const moved = !!(v.data && name && dayAreas.some((n) => n !== name));
+  return (
+    <div data-testid="visit-panel">
+      <h2 className="text-[24px] font-[680] leading-tight tracking-[-0.025em]">{name ? `Try ${name}` : "Try a neighborhood"}</h2>
+      <p className="mt-1.5 text-[14px] leading-relaxed text-ink-2">
+        A short walk of three or four places, enough to check the coffee, the food and the culture before you look at flats here.
+      </p>
+      {!hasLoves && !areas.length && !v.data ? (
+        <div className="mt-3 space-y-2 text-[14px] leading-relaxed text-ink-2">
+          <p>A walk starts from an area on your shortlist. Add a few things you love on the Map first.</p>
+          <Link href={href("/explore")} scroll={false} className="inline-flex items-center gap-1 font-[600] text-you-deep hover:underline">
+            Go to the Map <ArrowRight size={14} />
+          </Link>
+        </div>
+      ) : (
+        <>
+          {choices.length > 1 && (
+            <div className="mt-3" role="radiogroup" aria-label="Area to try">
+              <p className="text-[12.5px] font-[560] text-ink-3">Area from your shortlist</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {choices.map((a) => {
+                  const on = a.area.id === current;
+                  return (
+                    <button
+                      key={a.area.id}
+                      role="radio"
+                      aria-checked={on}
+                      disabled={v.loading}
+                      onClick={() => !on && build(a.area.id)}
+                      className={`flex h-9 max-w-full items-center gap-2 rounded-[10px] px-3 text-[13.5px] font-[580] transition-colors disabled:opacity-60 ${on ? "bg-ink text-paper" : "bg-paper-sunk text-ink-2 hover:text-ink"}`}
+                    >
+                      <span className="tnum text-[12px] opacity-70">#{a.metrics.rank}</span>
+                      <span className="truncate">{a.area.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <VisitRules />
+          <div className="mt-3 flex items-center gap-3" data-testid="visit-time">
+            <span className="w-[86px] shrink-0 text-[12.5px] font-[560] leading-tight text-ink-3">
+              Starts at <span className="tnum text-ink-2">{String(v.startHour ?? 14).padStart(2, "0")}:00</span>
+            </span>
+            <div className="min-w-0 flex-1">
+              <Segmented
+                size="sm"
+                label="When the walk starts"
+                value={nearestTime(v.startHour)}
+                onChange={(t) => {
+                  if (!current || v.loading) return;
+                  const hour = Number(t);
+                  // same area and rules, every place the person removed stays out; the stops are picked again for the new
+                  // hour (forcing the old ones in leaves a café that closes at 17:00 in an evening walk)
+                  void ex.buildVisit!(current, { startHour: hour, excludeIds: v.areaIds[0] === current ? v.excludeIds : [] });
+                }}
+                options={TIMES.map((t) => ({ value: t.value, label: t.label }))}
+              />
+            </div>
+          </div>
+          <div className="mt-4">
+            <Button
+              variant={v.data ? "secondary" : "primary"}
+              size="md"
+              className="w-full"
+              disabled={v.loading || !current}
+              onClick={() => current && build(current)}
+              data-testid="visit-plan"
+            >
+              {v.loading && !swapping ? <Spinner size={15} /> : <Route size={16} strokeWidth={1.9} />}
+              {v.data ? "Plan again" : "Plan a walk here"}
+            </Button>
+          </div>
+          <div className="mt-5" aria-busy={v.loading}>
+            {v.error && !v.data && <ErrorNote message={v.error.message} onRetry={current ? () => build(current) : undefined} />}
+            {v.loading && !v.data && (
+              <div className="space-y-3" aria-label="Planning the walk">
+                <p className="flex items-center gap-2 text-[13.5px] text-ink-2">
+                  <Spinner size={14} /> Picking places that pass your rules
+                </p>
+                {[0, 1, 2].map((i) => (
+                  <Skeleton key={i} className="h-[58px]" />
+                ))}
+              </div>
+            )}
+            {v.data && (
+              <div className={`space-y-3 transition-opacity ${v.loading ? "opacity-60" : ""}`} data-testid="visit-result">
+                <div className="flex items-baseline justify-between gap-2">
+                  <h3 className="text-[17px] font-[650] tracking-[-0.02em]">
+                    {stops.length} {stops.length === 1 ? "stop" : "stops"}
+                    {dayAreas.length ? <span className="font-[450] text-ink-2"> in {dayAreas.join(" and ")}</span> : null}
+                  </h3>
+                  {v.from === "assistant" && <span className="shrink-0 text-[12px] text-ink-3">From the assistant</span>}
+                </div>
+                {v.stale && (
+                  <p className="rounded-[10px] bg-paper-sunk px-3 py-2 text-[13px] text-ink-2" data-testid="visit-stale">
+                    Your tastes or rules changed after this walk was planned. Plan again to check it against them.
+                  </p>
+                )}
+                {moved && <p className="text-[13px] text-ink-2">Part of this walk is in another area; nothing closer to {name} passed your rules.</p>}
+                {v.error && <p className="text-[13px] text-[var(--err)]">{v.error.message}</p>}
+                <VisitAudit result={v.data} />
+                <RecoveryLog result={v.data} />
+                <VisitStops
+                  result={v.data}
+                  busy={v.loading}
+                  swapping={swapping}
+                  onSwap={ex.swapVisitStop ? (id) => void run(ex.swapVisitStop, id) : undefined}
+                  onRemove={ex.removeVisitStop ? (id) => void run(ex.removeVisitStop, id) : undefined}
+                  onHover={ex.setActivePlace}
+                />
+                <p className="text-[11.5px] text-ink-3">Times include approximate walking. Swap keeps the other stops; a removed place is not suggested again.</p>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Fold({ title, children, testId }: { title: string; children: React.ReactNode; testId?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="mt-6 border-t border-line pt-3" data-testid={testId}>
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex min-h-9 w-full items-center gap-1.5 text-left text-[14.5px] font-[620] text-ink">
+        <ChevronDown size={15} className={`transition-transform duration-200 ${open ? "" : "-rotate-90"}`} />
+        {title}
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.24, ease: [0.2, 0.8, 0.2, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="pt-2">{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </section>
+  );
+}
+
+function TryPanel() {
   const ex = useExplore();
+  if (ex.openPlace) return <PlaceDrawer key={`p-${ex.openPlace.id}`} place={ex.openPlace} />;
+  return (
+    <>
+      <VisitPanel />
+      <Fold title={`Saved places${ex.saved.length ? ` (${ex.saved.length})` : ""}`} testId="saved-fold">
+        <SavedPanel />
+      </Fold>
+      <Fold title="Plan up to three days" testId="long-plan-fold">
+        <PlanPanel />
+      </Fold>
+    </>
+  );
+}
+
+/** Try this neighborhood: one short walk with its rules; the longer plan and the saved places fold away below. */
+export function TripScreen() {
+  const ex = useAgentStore();
   const mobile = useIsMobile();
-  const [tab, setTab] = useState<"plan" | "saved">("plan");
+  const hasVisit = !!ex.visit?.data;
+  const setPlanDay = ex.setPlanDay;
+  useEffect(() => {
+    if (hasVisit) setPlanDay(0);
+  }, [hasVisit, setPlanDay]);
   if (mobile)
     return (
       <div className="absolute inset-x-0 bottom-0 flex h-[52%] flex-col overflow-hidden rounded-t-[24px] bg-paper-raised shadow-[var(--shadow-overlay)] ring-1 ring-line">
-        <div className="px-4 pt-3">
-          <Segmented
-            label="Trip"
-            value={tab}
-            onChange={setTab}
-            options={[
-              { value: "plan", label: "Plan" },
-              { value: "saved", label: `Saved${ex.saved.length ? ` ${ex.saved.length}` : ""}` },
-            ]}
-          />
+        <div className="hm-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-6 pt-4">
+          <TryPanel />
         </div>
-        <div className="hm-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-6 pt-4">{tab === "plan" ? <PlanPanel /> : <SavedPanel />}</div>
       </div>
     );
   return (
-    <>
-      <motion.aside
-        aria-label="Plan"
-        initial={{ opacity: 0, x: -20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={enter}
-        className="hm-scroll absolute left-4 top-[76px] max-h-[calc(100%-92px)] w-[460px] overflow-y-auto overscroll-contain rounded-[24px] bg-paper-raised/95 px-5 pb-6 pt-5 shadow-[var(--shadow-overlay)] ring-1 ring-line backdrop-blur"
-      >
-        <PlanPanel />
-      </motion.aside>
-      <motion.aside
-        aria-label="Saved places"
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ ...enter, delay: 0.06 }}
-        className="hm-scroll absolute right-4 top-[76px] max-h-[calc(100%-92px)] w-[360px] overflow-y-auto overscroll-contain rounded-[24px] bg-paper-raised/95 px-5 pb-6 pt-5 shadow-[var(--shadow-overlay)] ring-1 ring-line backdrop-blur"
-      >
-        <SavedPanel />
-      </motion.aside>
-    </>
+    <motion.aside
+      aria-label="Try this neighborhood"
+      initial={{ opacity: 0, x: -20 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={enter}
+      className="hm-scroll absolute left-4 top-[76px] max-h-[calc(100%-92px)] w-[460px] overflow-y-auto overscroll-contain rounded-[24px] bg-paper-raised/95 px-5 pb-6 pt-5 shadow-[var(--shadow-overlay)] ring-1 ring-line backdrop-blur"
+    >
+      <TryPanel />
+    </motion.aside>
   );
 }

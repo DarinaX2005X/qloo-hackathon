@@ -17,18 +17,23 @@ export type Screen = {
   /** one sentence for the More sheet */
   blurb: string;
   icon: LucideIcon;
+  /** main = the decision path (Map, Ask); tools = actions on a result, reachable but not equal to the main path */
+  group: "main" | "tools";
   /** shown in the mobile tab bar; the rest live in the More sheet */
   tab: boolean;
 };
 
+// §13.5: the main path is Map (with the shortlist) and Ask. Feels like home is a way to give the input, Address and
+// Visit are actions on a chosen area, Why is the proof behind it, Compare is an action on two results. Their deep links
+// keep working; they are not equal icons next to the main path.
 export const SCREENS: Screen[] = [
-  { path: "/explore", label: "Map", title: "Map", blurb: "Your taste over the city and the ranked neighborhoods.", icon: MapIcon, tab: true },
-  { path: "/explore/assistant", label: "Assistant", title: "Assistant", blurb: "Ask in your own words and Homing changes the map for you.", icon: MessagesSquare, tab: true },
-  { path: "/explore/home", label: "Home", title: "Feels like home", blurb: "Find the part of this city that feels like a neighborhood you loved.", icon: House, tab: true },
-  { path: "/explore/address", label: "Address", title: "Check an address", blurb: "See how the area around a flat fits your taste.", icon: MapPin, tab: true },
-  { path: "/explore/why", label: "Why", title: "What decides", blurb: "Which of your loves the ranking really rests on.", icon: Scale, tab: false },
-  { path: "/explore/trip", label: "Trip", title: "Trip", blurb: "Your first days, day by day, and the places you saved.", icon: Route, tab: false },
-  { path: "/explore/compare", label: "Compare", title: "Compare", blurb: "Two neighborhoods side by side, or the same taste in other cities.", icon: Columns2, tab: false },
+  { path: "/explore", label: "Map", title: "Map and shortlist", blurb: "Your taste over the city and the areas to start with.", icon: MapIcon, group: "main", tab: true },
+  { path: "/explore/assistant", label: "Ask", title: "Ask Homing", blurb: "Ask in your own words; Homing checks and changes the map for you.", icon: MessagesSquare, group: "main", tab: true },
+  { path: "/explore/home", label: "Home", title: "Feels like home", blurb: "Start from a neighborhood you loved and find what is closest to it here.", icon: House, group: "tools", tab: false },
+  { path: "/explore/address", label: "Address", title: "Check an address", blurb: "See the area around a flat and the everyday places within a short walk.", icon: MapPin, group: "tools", tab: false },
+  { path: "/explore/why", label: "Why", title: "Why this area", blurb: "What your loves change in the ranking, and the places behind it.", icon: Scale, group: "tools", tab: false },
+  { path: "/explore/trip", label: "Visit", title: "Try the neighborhood", blurb: "A short walk of three or four places to test an area in person.", icon: Route, group: "tools", tab: false },
+  { path: "/explore/compare", label: "Compare", title: "Compare", blurb: "Two areas side by side, or the same taste in two cities.", icon: Columns2, group: "tools", tab: false },
 ];
 
 export function screenOf(pathname: string): ScreenPath {

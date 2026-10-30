@@ -1,21 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeftRight, ChevronDown } from "lucide-react";
-import type { Neighborhood } from "@/shared/contracts";
+import type { AreaDecision } from "@/shared/contracts-09";
 import { activeLoves } from "@/shared/contracts";
 import { useExplore } from "./store";
 import { HoodCompare } from "./HoodCompare";
 import { CityCompare } from "./CompareCities";
 import { Segmented, Skeleton } from "@/components/ui/primitives";
 import { cityName } from "@/components/ui/CityPicker";
-import { MatchExplainer } from "@/components/ui/Match";
-import { matchPhrase } from "@/lib/honest";
+import { MetricNote } from "@/components/ui/Metric";
+import { areaName } from "@/components/screens/venue";
+import { platesOf, useAreas } from "@/components/screens/shared";
 import { useGoTo, useIsMobile } from "./nav";
 
-/** A styled listbox of the ranked neighborhoods. */
-function HoodPicker({ value, options, onChange, label, disabledId }: { value: Neighborhood; options: Neighborhood[]; onChange: (id: string) => void; label: string; disabledId?: string }) {
+/** A styled listbox of the checked areas. */
+function HoodPicker({ value, options, onChange, label, disabledId }: { value: AreaDecision; options: AreaDecision[]; onChange: (id: string) => void; label: string; disabledId?: string }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -34,13 +35,13 @@ function HoodPicker({ value, options, onChange, label, disabledId }: { value: Ne
       <button
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={`${label}: ${value.name}`}
+        aria-label={`${label}: ${areaName(value.area)}`}
         onClick={() => setOpen((v) => !v)}
         className="flex min-h-11 w-full items-center gap-2 rounded-[12px] bg-paper-raised py-1.5 pl-2 pr-2 text-left sm:pr-2.5 shadow-[var(--shadow-rest)] ring-1 ring-line transition-shadow hover:shadow-[var(--shadow-raised)]"
       >
-        <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${value.rank === 1 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{value.rank}</span>
+        <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${value.metrics.rank === 1 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{value.metrics.rank}</span>
         {/* a long name wraps to a second line instead of being cut ("Ville-M…") */}
-        <span className="line-clamp-2 min-w-0 flex-1 text-[15px] font-[600] leading-[1.2] tracking-[-0.01em]">{value.name}</span>
+        <span className="line-clamp-2 min-w-0 flex-1 text-[15px] font-[600] leading-[1.2] tracking-[-0.01em]">{areaName(value.area)}</span>
         <ChevronDown size={16} className={`shrink-0 text-ink-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       <AnimatePresence>
@@ -55,18 +56,17 @@ function HoodPicker({ value, options, onChange, label, disabledId }: { value: Ne
             className="hm-scroll absolute left-0 right-0 z-40 mt-1.5 max-h-72 origin-top overflow-auto rounded-[14px] bg-paper-raised p-1 shadow-[var(--shadow-overlay)] ring-1 ring-line"
           >
             {options.map((n) => (
-              <li key={n.id} role="option" aria-selected={n.id === value.id}>
+              <li key={n.area.id} role="option" aria-selected={n.area.id === value.area.id}>
                 <button
-                  disabled={n.id === disabledId}
+                  disabled={n.area.id === disabledId}
                   onClick={() => {
-                    onChange(n.id);
+                    onChange(n.area.id);
                     setOpen(false);
                   }}
-                  className={`flex w-full items-center gap-2 rounded-[10px] px-2 py-1.5 text-left text-[14px] disabled:opacity-40 ${n.id === value.id ? "bg-paper-sunk font-[600]" : "hover:bg-paper-sunk"}`}
+                  className={`flex w-full items-center gap-2 rounded-[10px] px-2 py-1.5 text-left text-[14px] disabled:opacity-40 ${n.area.id === value.area.id ? "bg-paper-sunk font-[600]" : "hover:bg-paper-sunk"}`}
                 >
-                  <span className="tnum w-6 shrink-0 text-center text-[12.5px] font-[620] text-ink-3">{n.rank}</span>
-                  <span className="min-w-0 flex-1 truncate">{n.name}</span>
-                  <span className="tnum shrink-0 text-[12.5px] font-[580] text-ink-2">{matchPhrase(n.score)}</span>
+                  <span className="tnum w-6 shrink-0 text-center text-[12.5px] font-[620] text-ink-3">{n.metrics.rank}</span>
+                  <span className="min-w-0 flex-1 truncate">{areaName(n.area)}</span>
                 </button>
               </li>
             ))}
@@ -80,15 +80,15 @@ function HoodPicker({ value, options, onChange, label, disabledId }: { value: Ne
 function Neighborhoods() {
   const ex = useExplore();
   const goTo = useGoTo();
-  const hoods = useMemo(() => ex.hoods.data ?? [], [ex.hoods.data]);
-  const byId = (id?: string) => hoods.find((n) => n.id === id);
+  const hoods = useAreas();
+  const byId = (id?: string) => hoods.find((n) => n.area.id === id);
   const a = byId(ex.compare[0]) ?? hoods[0];
-  const b = byId(ex.compare[1]) ?? hoods.find((n) => n.id !== a?.id);
+  const b = byId(ex.compare[1]) ?? hoods.find((n) => n.area.id !== a?.area.id);
 
   // only the two neighborhoods stay on the map while they are compared
   const { setOverlay } = ex;
   useEffect(() => {
-    if (a && b) setOverlay({ neighborhoods: [a, b], focus: [(a.center[0] + b.center[0]) / 2, (a.center[1] + b.center[1]) / 2] });
+    if (a && b) setOverlay({ neighborhoods: platesOf([a, b]).map((p, i) => ({ ...p, rank: [a, b][i].metrics.rank })), focus: [(a.area.center[0] + b.area.center[0]) / 2, (a.area.center[1] + b.area.center[1]) / 2] });
     else setOverlay(null);
   }, [a, b, setOverlay]);
   useEffect(() => () => setOverlay(null), [setOverlay]);
@@ -96,13 +96,13 @@ function Neighborhoods() {
   if (!activeLoves(ex.state.loves).length)
     return <p className="text-[14.5px] leading-relaxed text-ink-2">Add a few things you love on the Map screen, then compare the neighborhoods Homing ranks for you.</p>;
   if (!a || !b)
-    return ex.hoods.loading || ex.field.loading ? (
+    return ex.analysis.loading || ex.field.loading ? (
       <Skeleton className="h-[220px]" />
     ) : (
       <p className="text-[14.5px] text-ink-2">There are not enough ranked neighborhoods in {cityName(ex.state.city)} to compare yet.</p>
     );
   const set = (i: 0 | 1, id: string) => {
-    const next: [string, string] = [a.id, b.id];
+    const next: [string, string] = [a.area.id, b.area.id];
     next[i] = id;
     ex.setCompare(next);
   };
@@ -110,15 +110,15 @@ function Neighborhoods() {
     <div>
       {/* on a phone the two pickers stack, full width, so names are not cut; side by side from sm up */}
       <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1.5 sm:flex sm:gap-2">
-        <HoodPicker label="First neighborhood" value={a} options={hoods} onChange={(id) => set(0, id)} disabledId={b.id} />
+        <HoodPicker label="First neighborhood" value={a} options={hoods} onChange={(id) => set(0, id)} disabledId={b.area.id} />
         <button
-          onClick={() => ex.setCompare([b.id, a.id])}
+          onClick={() => ex.setCompare([b.area.id, a.area.id])}
           aria-label="Swap the two neighborhoods"
           className="row-span-2 grid h-9 w-9 shrink-0 place-items-center rounded-[10px] text-ink-2 transition-colors hover:bg-paper-sunk hover:text-ink"
         >
           <ArrowLeftRight size={16} className="rotate-90 sm:rotate-0" />
         </button>
-        <HoodPicker label="Second neighborhood" value={b} options={hoods} onChange={(id) => set(1, id)} disabledId={a.id} />
+        <HoodPicker label="Second neighborhood" value={b} options={hoods} onChange={(id) => set(1, id)} disabledId={a.area.id} />
       </div>
       <HoodCompare
         a={a}
@@ -129,7 +129,7 @@ function Neighborhoods() {
         }}
       />
       <p className="mt-2 text-[12.5px] text-ink-3">Click a name to open its places on the Map screen.</p>
-      <MatchExplainer className="mt-2" />
+      <MetricNote className="mt-2" city={cityName(ex.state.city)} candidateCount={a.metrics.candidateCount} />
     </div>
   );
 }
@@ -146,8 +146,8 @@ export function CompareScreen() {
   };
   const hoodsSection = (
     <section aria-label="Compare neighborhoods">
-      <h2 className="text-[22px] font-[660] leading-tight tracking-[-0.02em]">Two neighborhoods side by side</h2>
-      <p className="mb-4 mt-1.5 text-[14px] leading-relaxed text-ink-2">Where each one ranks for your taste in {cityName(ex.state.city)}, which of your loves lift it, and how busy it is.</p>
+      <h2 className="text-[22px] font-[660] leading-tight tracking-[-0.02em]">Two areas side by side</h2>
+      <p className="mb-4 mt-1.5 text-[14px] leading-relaxed text-ink-2">Where each one sits in the list for your taste in {cityName(ex.state.city)}, why, and the everyday places that back it up.</p>
       <Neighborhoods />
     </section>
   );

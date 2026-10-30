@@ -1,41 +1,48 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence } from "motion/react";
-import { ArrowRight, House } from "lucide-react";
-import type { Neighborhood } from "@/shared/contracts";
+import { ArrowRight, House, RotateCw } from "lucide-react";
+import type { HomeMatchV2 } from "@/shared/contracts-09";
 import { activeLoves } from "@/shared/contracts";
 import { useExplore } from "@/components/explore/store";
 import { Button, Segmented, Skeleton, Spinner } from "@/components/ui/primitives";
 import { CityPicker, cityName } from "@/components/ui/CityPicker";
-import { useFeatures } from "./features";
-import { HomeCard } from "./cards";
-import { ErrorNote, MapNote, ScreenPanel, ScreenTitle, useMapOverlay, useOpenMap, useSelectNeighborhood } from "./shared";
+import { HOME_BLEND_LAMBDA, useFeatures } from "./features";
+import { HomeMatchesCard } from "./decision";
+import { areaName } from "./venue";
+import { ErrorNote, MapNote, ScreenPanel, ScreenTitle, platesOf, useAreaActions, useMapOverlay } from "./shared";
 
 const SUGGESTIONS = [
   { neighborhood: "Kreuzberg", city: "Berlin" },
+  { neighborhood: "Alfama", city: "Lisbon" },
   { neighborhood: "Shoreditch", city: "London" },
   { neighborhood: "Williamsburg", city: "New York" },
   { neighborhood: "Le Marais", city: "Paris" },
   { neighborhood: "Shimokitazawa", city: "Tokyo" },
-  { neighborhood: "Gràcia", city: "Barcelona" },
 ];
 
-type Blend = "home" | "mix";
+type Order = "home" | "mix";
+
+/** `?from=<old city>&hood=<old neighborhood>` from the landing's "A neighborhood I loved", read once. */
+function landingSource(): { city: string; neighborhood: string } | null {
+  if (typeof window === "undefined") return null;
+  const q = new URLSearchParams(window.location.search);
+  const city = q.get("from")?.trim().slice(0, 80);
+  const neighborhood = q.get("hood")?.trim().slice(0, 80);
+  return city && neighborhood ? { city, neighborhood } : null;
+}
 
 export function HomeScreen() {
   const ex = useExplore();
   const f = useFeatures();
+  const actions = useAreaActions();
   const here = cityName(ex.state.city);
-  const hereKey = here.toLowerCase();
-  const suggestions = SUGGESTIONS.filter((s) => s.city.toLowerCase() !== hereKey);
-  const [oldCity, setOldCity] = useState(() => f.home.request?.city ?? suggestions[0].city);
+  const [oldCity, setOldCity] = useState(() => f.home.request?.city ?? "Berlin");
   const [hood, setHood] = useState(() => f.home.request?.neighborhood ?? "");
-  const [blend, setBlend] = useState<Blend>(() => (f.home.blend > 0 ? "mix" : "home"));
+  const [order, setOrder] = useState<Order>(() => (f.home.lambda > 0 ? "mix" : "home"));
   const [activeId, setActiveId] = useState<string | null>(null);
   const hasLoves = activeLoves(ex.state.loves).length > 0;
-  const select = useSelectNeighborhood();
-  const openMap = useOpenMap();
 
   // a result handed in by the assistant fills the form with what it answered
   const req = f.home.request;
@@ -45,36 +52,58 @@ export function HomeScreen() {
     setHood(req.neighborhood);
   }, [req]);
 
-  const result = f.home.data;
-  const run = (src = { city: oldCity, neighborhood: hood }, b: Blend = blend) => {
+  const run = (src = { city: oldCity, neighborhood: hood }, o: Order = order) => {
     if (!src.city.trim() || !src.neighborhood.trim()) return;
     setActiveId(null);
-    void f.findHome({ city: src.city, neighborhood: src.neighborhood }, b === "mix" && hasLoves ? 0.5 : 0);
+    void f.findHome({ city: src.city, neighborhood: src.neighborhood }, o === "mix" && hasLoves ? HOME_BLEND_LAMBDA : 0);
   };
 
-  const byId = useMemo(() => new Map((result?.neighborhoods ?? []).map((n) => [n.id, n])), [result]);
-  const top = result?.matches.map((m) => byId.get(m.neighborhoodId)).find(Boolean) ?? result?.neighborhoods[0] ?? null;
-  const active = (activeId && byId.get(activeId)) || null;
-  const focus = (active ?? top)?.center ?? null;
-  const overlay = useMemo(
-    () => (result ? { field: result.field, neighborhoods: result.neighborhoods, focus } : null),
+  // the landing handed a source in: read it before the store rewrites the URL (a child's effect runs first),
+  // then run it once the state is in place
+  const fromLanding = useRef<{ city: string; neighborhood: string } | null | undefined>(undefined);
+  useEffect(() => {
+    fromLanding.current = landingSource();
+    if (!fromLanding.current) return;
+    setOldCity(fromLanding.current.city);
+    setHood(fromLanding.current.neighborhood);
+  }, []);
+  const ranLanding = useRef(false);
+  useEffect(() => {
+    if (!fromLanding.current || ranLanding.current || !ex.hydrated) return;
+    ranLanding.current = true;
+    run(fromLanding.current, "home");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [result, focus?.[0], focus?.[1]],
+  }, [ex.hydrated]);
+
+  // Home + your taste depends on the loves: recompute when they change
+  useEffect(() => {
+    if (f.home.stale && !f.home.loading && f.home.request) run(f.home.request, "mix");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [f.home.stale]);
+
+  const view = f.home.data;
+  const matches = useMemo(() => view?.matches ?? [], [view]);
+  const active = matches.find((m) => m.area.area.id === activeId) ?? null;
+  const focus = (active ?? matches[0])?.area.area.center ?? null;
+  const overlay = useMemo(
+    () => (view ? { field: view.field ?? null, neighborhoods: platesOf(matches.map((m) => m.area)), focus } : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [view, matches, focus?.[0], focus?.[1]],
   );
   useMapOverlay(overlay);
 
-  const pick = (n: Neighborhood) => {
-    setActiveId(n.id);
-    select(n.id);
+  const pick = (m: HomeMatchV2) => {
+    setActiveId((id) => (id === m.area.area.id ? null : m.area.area.id));
+    if (ex.analysis.data?.areas.some((a) => a.area.id === m.area.area.id)) ex.patch([{ op: "select_neighborhood", id: m.area.area.id }]);
   };
-  const inRanking = !!active && !!ex.hoods.data?.some((n) => n.id === active.id);
+  const src = view?.sourceSignatureSummary;
 
   return (
     <>
       <ScreenPanel label="Feels like home" testId="home-screen">
         <ScreenTitle
           title="Feels like home"
-          lead={<>Name a neighborhood you loved living in. Homing reads the places that define it in Qloo and finds where that taste shows up in {here}.</>}
+          lead={<>Name a neighborhood you loved living in. Homing reads the places that define it and finds the areas of {here} with the closest cultural profile.</>}
         />
 
         <form
@@ -104,7 +133,7 @@ export function HomeScreen() {
             </label>
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {suggestions.map((s) => {
+            {SUGGESTIONS.map((s) => {
               const on = s.neighborhood === hood && s.city === oldCity;
               return (
                 <button
@@ -114,7 +143,7 @@ export function HomeScreen() {
                     setHood(s.neighborhood);
                     setOldCity(s.city);
                   }}
-                  className={`h-7 rounded-[8px] px-2.5 text-[12.5px] font-[540] transition-colors ${on ? "bg-ink text-paper" : "bg-paper-sunk text-ink-2 hover:bg-[color-mix(in_oklch,var(--you)_12%,var(--paper-sunk))] hover:text-ink"}`}
+                  className={`h-8 rounded-[8px] px-2.5 text-[12.5px] font-[540] transition-colors ${on ? "bg-ink text-paper" : "bg-paper-sunk text-ink-2 hover:bg-[color-mix(in_oklch,var(--them)_12%,var(--paper-sunk))] hover:text-ink"}`}
                 >
                   {s.neighborhood}
                 </button>
@@ -123,19 +152,19 @@ export function HomeScreen() {
           </div>
 
           <div className="pt-1.5">
-            <span className="mb-1 block text-[12.5px] font-[560] text-ink-3">What shapes the map</span>
+            <span className="mb-1 block text-[12.5px] font-[560] text-ink-3">Order the areas by</span>
             <Segmented
               size="sm"
-              label="What shapes the map"
-              value={hasLoves ? blend : "home"}
-              onChange={(v: Blend) => {
+              label="Order the areas by"
+              value={hasLoves ? order : "home"}
+              onChange={(v: Order) => {
                 if (v === "mix" && !hasLoves) return;
-                setBlend(v);
-                if (result && f.home.request) run(f.home.request, v);
+                setOrder(v);
+                if (view && f.home.request) run(f.home.request, v);
               }}
               options={[
-                { value: "home", label: "Old neighborhood only" },
-                { value: "mix", label: "Mix in what I love" },
+                { value: "home", label: "Closest to home" },
+                { value: "mix", label: "Home + your taste" },
               ]}
             />
             {!hasLoves && <p className="mt-1.5 text-[12px] text-ink-3">Add things you love on the Map screen to mix them in.</p>}
@@ -143,61 +172,56 @@ export function HomeScreen() {
 
           <Button data-testid="home-submit" type="submit" variant="primary" size="md" className="mt-1 w-full" disabled={f.home.loading || !hood.trim() || !oldCity.trim()}>
             {f.home.loading ? <Spinner size={15} /> : <House size={16} strokeWidth={1.9} />}
-            {f.home.loading ? `Looking for ${hood.trim() || "it"} in ${here}` : `Find it in ${here}`}
+            {f.home.loading ? `Reading ${hood.trim() || "it"}, then ${here}` : `Find it in ${here}`}
           </Button>
         </form>
 
         <div className="mt-5">
           {f.home.error && <ErrorNote message={f.home.error.message} onRetry={f.home.error.retryable ? () => run() : undefined} />}
 
-          {f.home.loading && !result && (
+          {f.home.loading && !view && (
             <div className="space-y-2.5">
               <p className="text-[13.5px] leading-snug text-ink-2">
-                Reading the places that make {hood.trim() || "the old neighborhood"} what it is, then printing them over {here}. The first time takes a few seconds.
+                Finding the places that define {hood.trim() || "the old neighborhood"}, then comparing the areas of {here} with them. The first time takes a few seconds.
               </p>
-              <Skeleton className="h-[132px]" />
               <Skeleton className="h-[150px]" />
+              <Skeleton className="h-[140px]" />
               <Skeleton className="h-[120px]" />
             </div>
           )}
 
-          {result && (
+          {view && (
             <div className={`transition-opacity ${f.home.loading ? "opacity-55" : ""}`}>
-              <HomeCard
-                result={result}
-                onPick={pick}
+              {f.home.loading && (
+                <p className="mb-2 flex items-center gap-2 text-[12.5px] text-ink-3">
+                  <RotateCw size={13} className="animate-spin" /> Checking again
+                </p>
+              )}
+              <HomeMatchesCard
+                view={view}
                 activeId={activeId}
-                activeNote={
-                  active &&
-                  (inRanking ? (
-                    <span className="flex items-center justify-between gap-3">
-                      <span>Selected on your own map too.</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openMap();
-                        }}
-                        className="flex shrink-0 items-center gap-1 font-[600] text-you-deep hover:underline"
-                      >
-                        See its places <ArrowRight size={14} />
-                      </button>
-                    </span>
-                  ) : (
-                    <span>Not in your own top neighborhoods yet, so the map flies there.</span>
-                  ))
+                onPick={pick}
+                actions={actions}
+                onBlend={
+                  hasLoves && f.home.request
+                    ? () => {
+                        setOrder("mix");
+                        run(f.home.request!, "mix");
+                      }
+                    : undefined
                 }
               />
             </div>
           )}
 
-          {!result && !f.home.loading && !f.home.error && (
+          {!view && !f.home.loading && !f.home.error && (
             <div className="rounded-[18px] bg-paper-sunk/70 p-4 text-[14px] leading-relaxed text-ink-2">
               <p>
-                Homing takes the cafés, bars and venues that define your old neighborhood and asks Qloo where people who love the same places gather in {here}. The terrain then shows that taste instead of yours.
+                Homing takes the cafés, food, bars and culture of your old neighborhood, finds what sets them apart, and looks for the areas of {here} whose places share it. You get the closest areas, what they share, and a place to try in each.
               </p>
               <p className="mt-3 text-[12.5px] font-[580] text-ink-3">Try one</p>
               <div className="mt-1.5 flex flex-wrap gap-2">
-                {suggestions.slice(0, 2).map((s) => (
+                {SUGGESTIONS.slice(0, 2).map((s) => (
                   <button
                     key={s.neighborhood}
                     onClick={() => {
@@ -205,7 +229,7 @@ export function HomeScreen() {
                       setOldCity(s.city);
                       run(s);
                     }}
-                    className="flex h-9 items-center gap-1.5 rounded-[11px] bg-paper-raised px-3 text-[13.5px] font-[580] text-ink shadow-[var(--shadow-rest)] ring-1 ring-line transition-transform hover:-translate-y-px"
+                    className="flex min-h-9 items-center gap-1.5 rounded-[11px] bg-paper-raised px-3 text-[13.5px] font-[580] text-ink shadow-[var(--shadow-rest)] ring-1 ring-line transition-transform hover:-translate-y-px"
                   >
                     I lived in {s.neighborhood}, {s.city} <ArrowRight size={14} className="text-you" />
                   </button>
@@ -217,14 +241,10 @@ export function HomeScreen() {
       </ScreenPanel>
 
       <AnimatePresence>
-        {result && (
+        {view && src && matches[0] && (
           <MapNote key="home-note">
-            The terrain shows{" "}
-            <b className="font-[620] text-ink">
-              {result.source.neighborhood}, {cityName(result.source.city)}
-            </b>{" "}
-            printed over {here}
-            {f.home.blend > 0 ? ", mixed with what you love" : ""}.
+            Numbered by closeness to <b className="font-[620] text-ink">{src.area.name}</b>
+            {matches[0].orderReason === "home_personal_blend" ? " and your taste" : ""}. #1 is {areaName(matches[0].area.area)}.
           </MapNote>
         )}
       </AnimatePresence>

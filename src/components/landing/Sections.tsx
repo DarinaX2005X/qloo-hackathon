@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { motion } from "motion/react";
 import type { ResolvedLove } from "@/shared/contracts";
 import { TerrainMap } from "@/components/map/TerrainMap";
+import { toShortlist } from "@/components/map/areas";
 import { LogoMark } from "@/components/brand/Logo";
 import { Button } from "@/components/ui/primitives";
 import { emptyState, encodeState } from "@/lib/state";
@@ -15,7 +16,7 @@ import { AnyCity, Demo, H2, MakeItYours } from "./More";
 
 /** Loves for a landing scene: ready from the server, resolved here only as a fallback. */
 function useResolved(names: LandingName[], prepared: LandingScene | null | undefined, pick: "loves" | "companion" = "loves") {
-  const { settled } = useLanding();
+  const { restSettled: settled } = useLanding();
   const [loves, setLoves] = useState<ResolvedLove[]>([]);
   useEffect(() => {
     if (!settled) return;
@@ -28,28 +29,50 @@ function useResolved(names: LandingName[], prepared: LandingScene | null | undef
 }
 
 
+/** Mounts its map only when the section comes near the screen: the first screen keeps a single WebGL canvas. */
+function useNear<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [near, setNear] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || near) return;
+    const io = new IntersectionObserver((e) => e.some((x) => x.isIntersecting) && setNear(true), { rootMargin: "300px 0px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [near]);
+  return [ref, near] as const;
+}
+
+/** Calm paper placeholder where a map will be drawn. */
+function MapSlot() {
+  return <div className="h-full w-full bg-paper-sunk/60" aria-hidden />;
+}
+
 function TasteCard({ title, names, city, scene }: { title: string; names: LandingName[]; city: string; scene: "reader" | "owl" }) {
-  const { data, markReady } = useLanding();
-  const loves = useResolved(names, data?.[scene]);
-  const { field, hoods } = useLiveField(city, loves, null, true, data?.[scene]);
+  const { data, restSettled } = useLanding();
+  const [box, near] = useNear<HTMLDivElement>();
+  const prepared = data?.[scene];
+  const loves = useResolved(names, prepared);
+  const { field, hoods } = useLiveField(city, near ? loves : [], null, true, prepared);
+  const areas = useMemo(() => toShortlist(prepared?.areas?.length ? prepared.areas : hoods), [prepared, hoods]);
   const href = `/explore?s=${encodeState({ ...emptyState(city), loves })}`;
   return (
     <div className="overflow-hidden rounded-[28px] bg-paper-raised shadow-[var(--shadow-raised)] ring-1 ring-line">
-      <div className="relative h-[340px] sm:h-[400px]">
-        <TerrainMap field={field} neighborhoods={hoods?.slice(0, 3) ?? []} variant="hero" padding={{ top: 40, bottom: 30, left: 30, right: 30 }} onReady={() => markReady(scene)} />
+      <div ref={box} className="relative h-[340px] sm:h-[400px]">
+        {near ? <TerrainMap field={field} neighborhoods={areas} variant="hero" padding={{ top: 40, bottom: 30, left: 30, right: 30 }} /> : <MapSlot />}
       </div>
       <div className="p-5 sm:p-6">
         <p className="text-[13px] font-[560] text-ink-3">{title}</p>
         <p className="mt-1 text-[19px] font-[620] leading-snug tracking-[-0.015em] text-ink">{namesText(names)}</p>
         <div className="mt-4 flex items-end justify-between gap-4">
           <ol className="space-y-1 text-[15px] text-ink-2">
-            {(hoods ?? []).slice(0, 3).map((h) => (
+            {areas.slice(0, 3).map((h) => (
               <li key={h.id} className="flex items-baseline gap-2">
                 <span className="tnum w-4 font-[650] text-ink">{h.rank}</span>
-                {h.name}
+                {h.label}
               </li>
             ))}
-            {!hoods && <li className="text-ink-3">Ranking neighborhoods</li>}
+            {!areas.length && <li className="text-ink-3">{restSettled ? "Open the map to compare its areas" : "Comparing areas"}</li>}
           </ol>
           <Link href={href} className="shrink-0 rounded-[11px] px-3 py-2 text-[14px] font-[580] text-you-deep transition-colors hover:bg-you-soft">
             Open this map
@@ -65,12 +88,12 @@ function SameCity() {
     <section className="mx-auto max-w-[1360px] px-5 py-24 md:px-10 md:py-32">
       <div className="grid gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16">
         <div className="lg:pt-6">
-          <h2 className={H2}>Same city, two different maps</h2>
+          <h2 className={H2}>Same city, two different shortlists</h2>
           <p className="mt-5 max-w-[440px] text-[18px] leading-[1.55] text-ink-2">
-            Neighborhood guides are written for an average visitor. Homing starts from what you love, so a quiet reader and a night owl moving to Berlin get different peaks, different streets and different first days.
+            Neighborhood guides are written for an average newcomer. Homing starts from what you love, so a reader and a night owl moving to Berlin get different areas to start looking in and different places to check there.
           </p>
           <p className="mt-4 max-w-[440px] text-[16px] leading-[1.55] text-ink-3">
-            Both maps below are live. They come from Qloo&apos;s taste graph, which connects what people like across music, film, books, brands and places to where those audiences actually spend time.
+            Both examples use the same set of walkable areas in Berlin. Only the loves change. The signal comes from Qloo, which links what people like across music, film, books and brands to places in a city.
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -84,33 +107,33 @@ function SameCity() {
 
 const STEPS = [
   {
-    title: "You name what you love",
-    body: "Type a few names, a genre like “jazz”, or drop a screenshot of a playlist, watchlist or bookshelf. Each one is matched to an entity in Qloo's taste graph, so “Fleabag” means the show, with its audience.",
+    title: "You say what you love, or where you lived",
+    body: "Type a few artists, shows, books or brands, or name a neighborhood you loved living in. Each name is matched to one entity in Qloo, and when a name could mean two things Homing asks which one.",
     call: "Qloo search",
   },
   {
-    title: "The city becomes a taste field",
-    body: "For each thing you love, Qloo returns how strongly its audience over-indexes across the city. Homing corrects each map for how busy every cell is, weighs your loves the way you tell it to and ranks where they overlap.",
+    title: "The new city is split into walkable areas",
+    body: "Homing marks out the same set of areas for everyone: circles of about 650 metres around named places in the city centre. Your loves change their order and never the areas themselves.",
+    call: "Fixed areas per city",
+  },
+  {
+    title: "Your loves are read across those areas",
+    body: "For each love, Qloo returns how strongly its signal shows up across the city. Homing combines them by the weights you set and puts the areas in order. Treat the order as a place to start looking.",
     call: "Qloo insights, heatmap",
   },
   {
-    title: "Popular or less busy is your call",
-    body: "Every cell also knows how busy it is overall in Qloo's data. The crowd dial leans toward or away from the busiest areas; it says nothing about who lives there.",
-    call: "Popularity per cell",
+    title: "Every area comes with real places",
+    body: "Before an area is shown, Homing looks for cafés, food, bars and culture inside it that fit you, and drops places that do not fit the role, like a supermarket in a coffee slot.",
+    call: "Qloo places",
   },
   {
-    title: "Neighborhoods, with reasons",
-    body: "Cells are grouped into real neighborhoods from the places inside them. Each one says which of your loves pulls it up and what its cafés and bars feel like.",
-    call: "Qloo places and tags",
+    title: "Check an address, then walk it",
+    body: "Type the street of a flat you saw and Homing tells you which area it falls in and what is near. Then try the area with a short walk of three or four places for one afternoon.",
+    call: "Geocoder and Qloo places",
   },
   {
-    title: "Places and a plan you can use",
-    body: "Inside a neighborhood Homing picks cafés, food, bars, culture and stays that fit you, then plans your first days around real opening hours and walking distance.",
-    call: "Qloo places, hours",
-  },
-  {
-    title: "Talk to it like a friend who knows the city",
-    body: "“Less touristy.” “I work from cafés.” “Add my partner: techno and Succession.” The agent turns that into changes on the map and tells you what it did.",
+    title: "Ask in your own words",
+    body: "“No bars, I work from cafés.” “Compare it with Berlin.” The assistant runs the same tools, checks the result against what you asked and tells you plainly when part of it could not be done.",
     call: "Agent with Qloo tools",
   },
 ];
@@ -143,28 +166,30 @@ function How() {
 }
 
 function TwoInks() {
-  const { data, markReady } = useLanding();
+  const { data } = useLanding();
+  const [box, near] = useNear<HTMLDivElement>();
   const you = useResolved(LANDING.pair.you, data?.pair);
   const them = useResolved(LANDING.pair.them, data?.pair, "companion");
-  const { field, hoods } = useLiveField(LANDING.pair.city, you, them, true, data?.pair);
+  const { field, hoods } = useLiveField(LANDING.pair.city, near ? you : [], them, true, data?.pair);
+  const areas = useMemo(() => toShortlist(data?.pair?.areas?.length ? data.pair.areas : hoods), [data?.pair, hoods]);
   return (
     <section className="mx-auto max-w-[1360px] px-5 py-24 md:px-10 md:py-32">
       <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-16">
-        <div className="order-2 h-[440px] overflow-hidden rounded-[28px] bg-paper-raised shadow-[var(--shadow-raised)] ring-1 ring-line sm:h-[540px] lg:order-1">
-          <TerrainMap field={field} mode="pair" neighborhoods={hoods?.slice(0, 3) ?? []} variant="hero" padding={{ top: 40, bottom: 40, left: 40, right: 40 }} onReady={() => markReady("pair")} />
+        <div ref={box} className="order-2 h-[440px] overflow-hidden rounded-[28px] bg-paper-raised shadow-[var(--shadow-raised)] ring-1 ring-line sm:h-[540px] lg:order-1">
+          {near ? <TerrainMap field={field} mode="pair" neighborhoods={areas} variant="hero" padding={{ top: 40, bottom: 40, left: 40, right: 40 }} /> : <MapSlot />}
         </div>
         <div className="order-1 lg:order-2">
           <h2 className={H2}>Moving with someone</h2>
           <p className="mt-5 text-[18px] leading-[1.55] text-ink-2">
-            Add what they love and the map prints in two inks. Red is you, teal is them, and the dark overprint is where you both belong. Neighborhoods are ranked so the less happy of you two is as happy as possible, not by an average that leaves one person out.
+            Add what they love and the map prints in two inks: red for you, teal for them, and a dark overprint where both signals are strong. Areas are ordered by the weaker of your two results, so a strong match for one person cannot hide a poor fit for the other.
           </p>
           <div className="mt-6 flex flex-wrap gap-2 text-[14px]">
             <span className="rounded-[9px] bg-you-soft px-2.5 py-1.5 font-[540] text-you-deep">Murakami, Radiohead, Wes Anderson</span>
             <span className="rounded-[9px] bg-them-soft px-2.5 py-1.5 font-[540] text-[oklch(42%_0.09_205)]">Peggy Gou, Succession, Patagonia</span>
           </div>
-          {hoods?.[0] && (
+          {areas[0] && (
             <p className="mt-5 text-[16px] text-ink-2">
-              Their best shared start in Lisbon: <strong className="font-[620] text-ink">{hoods[0].name}</strong>.
+              Their first shared area to check in Lisbon: <strong className="font-[620] text-ink">{areas[0].label}</strong>.
             </p>
           )}
         </div>
@@ -182,11 +207,11 @@ function Closing() {
           <path d="M18.6 37.4c-.9-9.3 6.4-20.5 17-21.6 9.8-1 16 5.9 15.2 14.6-.8 9.2-7.8 15.3-16.6 15.1-8.2-.2-14.9-2.6-15.6-8.1Z" stroke="white" strokeWidth="1.2" />
           <path d="M30.4 31.9c-.3-4.7 3.4-9.6 8.3-9.9 4.5-.2 7.2 3.1 6.8 7.2-.4 4.3-3.6 7-7.8 6.9-3.9-.1-7.1-1.2-7.3-4.2Z" stroke="white" strokeWidth="1.2" />
         </svg>
-        <h2 className="relative max-w-[760px] text-[40px] font-[700] leading-[1.02] tracking-[-0.035em] sm:text-[64px]">Your people are already somewhere in that city</h2>
+        <h2 className="relative max-w-[760px] text-[40px] font-[700] leading-[1.02] tracking-[-0.035em] sm:text-[64px]">Know where to start looking before you book viewings</h2>
         <div className="relative mt-8">
           <Link href="/explore">
             <Button variant="ink" size="lg">
-              Map my taste
+              Find my areas
             </Button>
           </Link>
         </div>

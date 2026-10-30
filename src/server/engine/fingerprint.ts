@@ -27,6 +27,7 @@ export function placeTasteTag(tag: TagRef): boolean {
 
 /** Count a matching name at most once per venue, even across ambience/decor namespaces. */
 export function matchedPlaceTags(places: QlooRecord[], desired: TagRef[], tasteOnly = true, limit = 3): string[] {
+  if (!desired.length) return [];
   const wanted = new Map<string, { name: string; order: number; priority: number }>();
   desired.filter(meaningfulTag).forEach((tag, order) => {
     const key = tagName(tag.name);

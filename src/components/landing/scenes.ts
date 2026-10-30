@@ -1,4 +1,5 @@
 import type { CityScore, Domain, Neighborhood, ResolvedLove, TasteField } from "@/shared/contracts";
+import type { AreaDecision, ResultMeta } from "@/shared/contracts-09";
 
 /** A name on the landing, with the kind of thing it means when the bare name is ambiguous
  *  ("Euphoria" alone finds the novel first; the night owl means the HBO show). */
@@ -33,5 +34,15 @@ export const LANDING: {
   compare: ["Lisbon", "Tokyo, Japan", "New York", "Mexico City", "Berlin"],
 };
 
-export type LandingScene = { city: string; loves: ResolvedLove[]; companion: ResolvedLove[] | null; field: TasteField; hoods: Neighborhood[] };
+export type LandingScene = {
+  city: string;
+  loves: ResolvedLove[];
+  companion: ResolvedLove[] | null;
+  field: TasteField;
+  hoods: Neighborhood[];
+  /** v2: the first areas with their reason, tradeoff and real anchors */
+  areas?: AreaDecision[];
+  /** v2: when and how the example was computed */
+  meta?: ResultMeta;
+};
 export type LandingData = { hero: LandingScene | null; reader: LandingScene | null; owl: LandingScene | null; pair: LandingScene | null; cities: CityScore[] | null };

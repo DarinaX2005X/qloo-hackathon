@@ -5,7 +5,7 @@ import { consumeQlooCall, withoutQlooBudget } from "./budget";
 export type QlooParams = Record<string, string | number | undefined>;
 export type QlooRecord = Record<string, unknown>;
 type QlooRuntime = {
-  cache: Map<string, { value: unknown; expires: number }>;
+  cache: Map<string, { value: unknown; expires: number; fetchedAt?: string }>;
   pending: Map<string, Promise<unknown>>;
   active: number;
   queue: (() => void)[];
@@ -15,6 +15,7 @@ const processGlobal = globalThis as typeof globalThis & { __homingQlooRuntime?: 
 const runtime: QlooRuntime = processGlobal.__homingQlooRuntime ??= { cache: new Map(), pending: new Map(), active: 0, queue: [] };
 const { cache, pending } = runtime;
 const TTL = 604800;
+const PARSER_VERSION = "stage09-native-ranks-explainability-v1";
 
 export function record(value: unknown): QlooRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? value as QlooRecord : {};
@@ -43,19 +44,21 @@ export function resultRows(value: unknown, key: "entities" | "tags" | "heatmap")
   return records(rows);
 }
 
+const RETAINED_FIELDS = new Set([
+    "results", "entities", "tags", "heatmap", "entity_id", "id", "tag_id", "name", "type", "types", "subtype",
+    "properties", "location", "latitude", "longitude", "lat", "lon", "geohash", "query", "popularity", "affinity", "affinity_rank",
+    "image", "images", "url", "website", "description", "short_description", "neighborhood", "geocode", "hours", "price_level", "address", "weight",
+    "keywords", "count", "parents", "is_closed", "primary_genre", "opens", "closes", "closed", "place_type",
+    "explainability", "signal.interests.entities", "warning", "warnings", "score", "references_brand", "brand", "brands",
+    "city", "country", "country_code", "admin1_region", "admin2_region", "locality", "neighbourhood",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+]);
 /** Keep only fields used by the engine before retaining a response in memory. */
 export function trimResponse(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(trimResponse);
   if (!value || typeof value !== "object") return value;
-  const allowed = new Set([
-    "results", "entities", "tags", "heatmap", "entity_id", "id", "tag_id", "name", "type", "types", "subtype",
-    "properties", "location", "latitude", "longitude", "lat", "lon", "geohash", "query", "popularity", "affinity",
-    "image", "images", "url", "website", "description", "short_description", "neighborhood", "geocode", "hours", "price_level", "address", "weight",
-    "keywords", "count", "parents", "is_closed", "primary_genre", "opens", "closes", "closed",
-    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-  ]);
   return Object.fromEntries(Object.entries(record(value)).filter(([key]) =>
-    allowed.has(key) || /^entity_\w+_affinity$/.test(key),
+    RETAINED_FIELDS.has(key) || /^entity_\w+_affinity(?:_rank)?$/.test(key),
   ).map(([key, item]) => [key, key === "description" && typeof item === "string" ? item.slice(0, 160) : trimResponse(item)]));
 }
 
@@ -144,7 +147,7 @@ export async function qlooGet(path: string, params: QlooParams): Promise<unknown
   catch { throw apiError("qloo_unavailable", "Qloo is not configured."); }
   for (const [key, value] of Object.entries(params).sort(([a], [b]) => a.localeCompare(b)))
     if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
-  const key = createHash("sha256").update(apiKey).update(url.href).digest("hex");
+  const key = createHash("sha256").update(PARSER_VERSION).update(apiKey).update(url.href).digest("hex");
   const hit = cache.get(key);
   if (hit && hit.expires > Date.now()) {
     cache.delete(key);
@@ -158,7 +161,7 @@ export async function qlooGet(path: string, params: QlooParams): Promise<unknown
   let task = pending.get(key);
   if (!task) {
     task = withoutQlooBudget(() => fetchQloo(url, apiKey).then((value) => {
-      cache.set(key, { value, expires: Date.now() + TTL * 1000 });
+      cache.set(key, { value, expires: Date.now() + TTL * 1000, fetchedAt: new Date().toISOString() });
       if (cache.size > 500) cache.delete(cache.keys().next().value!);
       return value;
     }).finally(() => {
@@ -168,4 +171,15 @@ export async function qlooGet(path: string, params: QlooParams): Promise<unknown
     pending.set(key, task);
   }
   return structuredClone(await task);
+}
+
+/** Provenance exposes a hash of public parameters, never credentials or the private URL. */
+export async function qlooRead(path: string, params: QlooParams): Promise<{ value: unknown; fetchedAt: string; requestHash: string }> {
+  const value = await qlooGet(path, params);
+  const url = new URL(path, process.env.QLOO_API_URL || "https://hackathon.api.qloo.com");
+  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "").sort(([a], [b]) => a.localeCompare(b));
+  for (const [key, item] of entries) url.searchParams.set(key, String(item));
+  const key = createHash("sha256").update(PARSER_VERSION).update(process.env.QLOO_API_KEY ?? "").update(url.href).digest("hex");
+  return { value, fetchedAt: cache.get(key)?.fetchedAt ?? new Date().toISOString(),
+    requestHash: createHash("sha256").update(JSON.stringify([path, entries])).digest("hex").slice(0, 24) };
 }

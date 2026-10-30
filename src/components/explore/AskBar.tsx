@@ -6,6 +6,7 @@ import { ArrowRight, ArrowUp } from "lucide-react";
 import { useExplore } from "./store";
 import { useGoTo, useScreenHref } from "./nav";
 import { Spinner } from "@/components/ui/primitives";
+import { deriveTurn, liveSteps } from "@/components/agent09/turn";
 
 /** A one-line question on the Map screen: it sends the question to the assistant and opens the Assistant screen. */
 export function AskBar() {
@@ -14,6 +15,9 @@ export function AskBar() {
   const href = useScreenHref();
   const [text, setText] = useState("");
   const turns = ex.chat.filter((t) => t.role === "user").length;
+  // while the assistant works, say what it is doing right now (a turn can take half a minute)
+  const last = ex.chat[ex.chat.length - 1];
+  const now = ex.agentBusy && last?.events?.length ? liveSteps(deriveTurn(last.events).steps, 1)[0]?.text : null;
   const send = () => {
     const t = text.trim();
     if (!t || ex.agentBusy) return;
@@ -24,9 +28,11 @@ export function AskBar() {
   return (
     <div className="border-t border-line bg-paper-raised/70 px-4 pb-4 pt-3">
       {turns > 0 && (
-        <Link href={href("/explore/assistant")} scroll={false} className="mb-2 flex items-center gap-1.5 text-[12.5px] font-[560] text-ink-2 hover:text-ink">
+        <Link href={href("/explore/assistant")} scroll={false} className="mb-2 flex min-h-8 items-center gap-1.5 text-[12.5px] font-[560] text-ink-2 hover:text-ink">
           {ex.agentBusy ? <Spinner size={12} /> : null}
-          {ex.agentBusy ? "Homing is answering" : `Back to your conversation (${turns} ${turns === 1 ? "question" : "questions"})`}
+          <span className="min-w-0 truncate">
+            {ex.agentBusy ? (now ? `Homing: ${now}` : "Homing is working on your question") : `Back to your conversation (${turns} ${turns === 1 ? "question" : "questions"})`}
+          </span>
           <ArrowRight size={13} />
         </Link>
       )}
@@ -42,7 +48,7 @@ export function AskBar() {
           value={text}
           maxLength={1000}
           onChange={(e) => setText(e.target.value)}
-          placeholder="Ask Homing to adjust the map"
+          placeholder="Ask about an area, an address or a walk"
           aria-label="Ask Homing"
           className="h-9 min-w-0 flex-1 bg-transparent text-[14.5px] text-ink outline-none placeholder:text-ink-3"
         />

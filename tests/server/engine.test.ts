@@ -28,7 +28,7 @@ describe("search and fingerprint", () => {
     get.mockResolvedValue({ results: [entity, entity] });
     expect(await searchEntities("Director")).toEqual([{ id: "director", name: "Director", domain: "person", image: "https://image.test", subtitle: "x".repeat(90) }]);
     expect((await searchEntities("Director", "author"))[0].domain).toBe("person");
-    get.mockResolvedValue({ results: [{ ...entity, types: ["urn:entity:author"] }] });
+    get.mockResolvedValue({ results: [{ ...entity, name: "Writer", types: ["urn:entity:author"] }] });
     expect((await searchEntities("Writer", "author"))[0].domain).toBe("author");
     expect(get).toHaveBeenLastCalledWith("/search", { query: "Writer", types: "urn:entity:author", take: 6 });
     get.mockResolvedValue({ results: [{ ...entity, types: ["urn:entity:author"] }, { ...entity, types: ["urn:entity:person"] }] });

@@ -50,9 +50,35 @@ export async function searchEntities(q: string, domain?: Domain): Promise<Entity
   const found = new Map<string, EntityRef>();
   for (const row of mergeEntityRows(resultRows(response, "entities"))) {
     const entity = entityRef(row, domain);
-    if (entity && !found.has(entity.id)) found.set(entity.id, entity);
+    if (entity && lexicalAgreement(q, entity.name) && !found.has(entity.id)) found.set(entity.id, entity);
   }
-  return [...found.values()].slice(0, 6);
+  return [...found.values()].sort((a, b) => Number(normalizeEntityName(b.name) === normalizeEntityName(q)) - Number(normalizeEntityName(a.name) === normalizeEntityName(q)) || (b.popularity ?? 0) - (a.popularity ?? 0)).slice(0, 6);
+}
+
+export function normalizeEntityName(text: string): string {
+  return text.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+/** A provider's popular namesake is not resolution of unrelated input. Prefixes support autocomplete. */
+export function lexicalAgreement(query: string, candidate: string): boolean {
+  const q = normalizeEntityName(query), c = normalizeEntityName(candidate);
+  if (!q || !c) return false;
+  if (q === c) return true;
+  const words = q.split(" "), candidateWords = c.split(" ");
+  if (words.every(word => candidateWords.some(other => other === word || word.length >= 3 && other.startsWith(word)))) return true;
+  // A single transposition or insertion/deletion is allowed only for a reasonably long whole name.
+  if (q.length < 5 || Math.abs(q.length - c.length) > 1) return false;
+  const previous = Array.from({ length: c.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= q.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= c.length; j++) current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + Number(q[i - 1] !== c[j - 1]));
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[c.length] <= 1;
+}
+
+export function entityResolution(query: string, results: EntityRef[]): "exact" | "ambiguous" | "no_match" {
+  if (!results.length) return "no_match";
+  return results.filter(r => normalizeEntityName(r.name) === normalizeEntityName(query) && !r.via).length === 1 ? "exact" : "ambiguous";
 }
 
 const squash = (text: string) => text.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]/g, "");

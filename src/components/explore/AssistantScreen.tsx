@@ -2,267 +2,122 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, ArrowUp, CalendarDays, Check, ChevronDown, ImagePlus, Map as MapIcon, MessagesSquare, RotateCcw, Square } from "lucide-react";
-import type { AgentCard, Category, Itinerary, Neighborhood } from "@/shared/contracts";
-import { activeLoves, CATEGORIES } from "@/shared/contracts";
-import { useExplore, type ChatTurn, type PlanOptions } from "./store";
+import { ArrowUp, ImagePlus, Map as MapIcon, MessagesSquare, RotateCcw, Square } from "lucide-react";
+import { activeLoves } from "@/shared/contracts";
+import { useExplore, type ChatTurn } from "./store";
 import { api } from "./api";
 import { useGoTo, useIsMobile } from "./nav";
 import { Spinner } from "@/components/ui/primitives";
 import { cityName } from "@/components/ui/CityPicker";
-import { useFeatures } from "@/components/screens/features";
-import { DecidesCard, HomeCard, SpotCard } from "@/components/screens/cards";
-import { BelowNeutralNote, MatchValue } from "@/components/ui/Match";
-import { dayNoteLines } from "@/lib/explain";
-import { stopReasonLines } from "@/lib/honest";
+import { AgentTurnV2 } from "@/components/agent09/AgentTurn";
+import { deriveTurn, liveSteps } from "@/components/agent09/turn";
+import { ConstraintChips } from "@/components/agent09/Constraints";
+import { WaitNote } from "@/components/agent09/WaitNote";
+import { useAgentStore } from "@/components/agent09/useAgentStore";
+import type { AgentCardV2, AreaDecision } from "@/components/agent09/types";
+type AreaIdentity = AreaDecision["area"];
 
 const MAX = 1000;
 const spring = { type: "spring", stiffness: 420, damping: 36 } as const;
 
-/** Starter questions that use the real names on the map right now. */
+/** Starter questions that use the real names on the map right now. Each one is a whole task the assistant can
+ *  plan, check and finish, not a single setting. */
 function useSuggestions(): string[] {
   const ex = useExplore();
   const top = ex.hoods.data?.[0];
   const city = cityName(ex.state.city);
   const asked = new Set(ex.chat.filter((t) => t.role === "user").map((t) => t.text.toLowerCase()));
   const last = [...ex.chat].reverse().find((t) => t.role === "assistant" && !t.pending);
-  const lastKinds = new Set(last?.cards.map((c) => c.kind) ?? []);
+  const kinds = new Set<string>([...(last?.cards.map((c) => c.kind) ?? []), ...(last?.events ?? []).flatMap((e) => (e.type === "result" ? [e.card.kind] : []))]);
   const hasLoves = activeLoves(ex.state.loves).length > 0;
-  const address =
-    city === "Lisbon" ? "How is Rua da Rosa 120 for me?" : top ? `How would a flat in the middle of ${top.name} suit me?` : null;
+  const firstLove = activeLoves(ex.state.loves)[0]?.chosen.name;
+  const lisbon = city === "Lisbon";
+  const address = lisbon ? "Check Rua da Rosa 120 for me. Then plan a relaxed afternoon nearby, no museums, no bars." : top ? `Check an address in ${top.name} for me, then plan a relaxed afternoon nearby.` : null;
   let list: (string | null)[];
-  if (!hasLoves)
-    list = [`I love Radiohead, Fleabag and natural wine. Map ${city} for me`, "I'm moving here with my partner, who loves techno and Succession", "I used to live in Kreuzberg, Berlin"];
-  else if (lastKinds.has("home"))
-    list = ["Mix in what I love as well", top ? `Why is ${top.name} first for me?` : null, address, "Plan three days"];
-  else if (lastKinds.has("spot"))
-    list = ["Which neighborhood fits me better than this?", "What's open late within a short walk?", "Plan three days"];
-  else if (lastKinds.has("plan"))
-    list = ["Start our days later, around 11", "No museums, please", address, top ? `Why is ${top.name} first?` : null];
-  else if (lastKinds.has("decides"))
-    list = ["Less touristy, I work from cafés", "I used to live in Kreuzberg, Berlin", "Plan three days"];
+  if (kinds.has("visit") || kinds.has("plan"))
+    list = ["Replace the second stop and keep the rest.", "Plan the same walk for the evening.", top ? `Why is ${top.name} first?` : null];
+  else if (kinds.has("venues"))
+    list = ["My partner doesn't like clubs. What could we do near our shortlist together?", address];
+  else if (kinds.has("home") || kinds.has("comparison"))
+    list = ["Open the closest option on the map.", top ? `Why is ${top.name} first? What if one of my loves mattered less?` : null, address];
+  else if (kinds.has("areas") || kinds.has("ranking") || kinds.has("explanation") || kinds.has("decides"))
+    list = [top ? `Why ${top.name}?${firstLove ? ` What if ${firstLove} mattered less?` : ""}` : null, address, "Where can I go dancing? No hotel bars and no adult clubs."];
+  else if (!hasLoves)
+    list = [
+      `I'm moving to ${city}. I love Radiohead, Fleabag and Patagonia. I work from cafés. Where should I start looking?`,
+      `I loved living in Kreuzberg, Berlin. Where in ${city} could feel familiar? Use my tastes too if the match is weak.`,
+      `Would ${lisbon ? "Lisbon or Reykjavík" : `${city} or Lisbon`} feel closer to Kreuzberg?`,
+    ];
   else
     list = [
-      "I used to live in Kreuzberg, Berlin",
+      top ? `Why is ${top.name} first for me?` : null,
+      `I loved living in Kreuzberg, Berlin. Where in ${city} could feel familiar?`,
       address,
-      top ? `Why is ${top.name} first?` : null,
-      "Less touristy, I work from cafés",
-      "Plan three days",
+      "Where can I go dancing? No hotel bars and no adult clubs.",
     ];
-  return list.filter((s): s is string => !!s && !asked.has(s.toLowerCase())).slice(0, 5);
+  return list.filter((s): s is string => !!s && !asked.has(s.toLowerCase())).slice(0, 4);
 }
 
-function Steps({ turn }: { turn: ChatTurn }) {
-  const [open, setOpen] = useState(false);
-  const live = !!turn.pending;
-  if (!turn.trace.length) return null;
-  if (live)
-    return (
-      <ul className="space-y-1.5">
-        <AnimatePresence initial={false}>
-          {turn.trace.map((s, i) => (
-            <motion.li key={i} initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} className="flex items-start gap-2 text-[13px] leading-snug text-ink-2">
-              <Check size={13} strokeWidth={2.4} className="mt-[3px] shrink-0 text-ok" />
-              <span>{s.summary}</span>
-            </motion.li>
-          ))}
-        </AnimatePresence>
-      </ul>
-    );
-  return (
-    <div>
-      <button onClick={() => setOpen((v) => !v)} aria-expanded={open} className="flex items-center gap-1.5 rounded-[8px] py-0.5 text-[12.5px] font-[580] text-ink-3 hover:text-ink">
-        <ChevronDown size={14} className={`transition-transform duration-200 ${open ? "" : "-rotate-90"}`} />
-        What I did, {turn.trace.length} {turn.trace.length === 1 ? "step" : "steps"}
-      </button>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.ul
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
-            className="space-y-1.5 overflow-hidden pl-5 pt-1.5"
-          >
-            {turn.trace.map((s, i) => (
-              <li key={i} className="flex items-start gap-2 text-[13px] leading-snug text-ink-2">
-                <Check size={13} strokeWidth={2.4} className="mt-[3px] shrink-0 text-ok" />
-                <span>{s.summary}</span>
-              </li>
-            ))}
-          </motion.ul>
-        )}
-      </AnimatePresence>
-    </div>
-  );
+/** Area IDs for a visit the assistant built: its day areas matched against the current shortlist, else the
+ *  areas the agent remembered as selected, else the current selection. */
+function visitAreaIds(ex: ReturnType<typeof useAgentStore>, card: Extract<AgentCardV2, { kind: "visit" }>, turn: ChatTurn): string[] {
+  const named = new Set(card.result.itinerary.days.map((d) => d.neighborhood.trim().toLowerCase()));
+  // areas this turn and the current shortlist know by name: the visit names its areas, not their ids
+  const known: AreaIdentity[] = [...(ex.analysis?.data?.areas ?? []).map((a) => a.area)];
+  for (const e of turn.events ?? []) {
+    if (e.type !== "result") continue;
+    const c = e.card;
+    if (c.kind === "address" && c.result.area) known.push(c.result.area.area);
+    if (c.kind === "areas") known.push(...c.areas.map((a) => a.area));
+    if (c.kind === "home") known.push(...c.matches.map((m) => m.area.area));
+  }
+  const hit = (a: AreaIdentity) => named.has(a.name.trim().toLowerCase()) || a.aliases.some((x) => named.has(x.trim().toLowerCase()));
+  const byName = [...new Set(known.filter(hit).map((a) => a.id))];
+  if (byName.length) return byName.slice(0, 3);
+  const done = [...(turn.events ?? [])].reverse().find((e) => e.type === "done");
+  const mem = done && done.type === "done" ? done.memory.selectedAreaIds : [];
+  if (mem.length) return mem.slice(0, 3);
+  const cur = ex.state.neighborhood ?? ex.analysis?.data?.areas[0]?.area.id;
+  return cur ? [cur] : [];
 }
 
-function RankingCard({ hoods }: { hoods: Neighborhood[] }) {
-  const ex = useExplore();
+function TurnV2({ turn, retry }: { turn: ChatTurn; retry?: () => void }) {
+  const ex = useAgentStore();
   const goTo = useGoTo();
-  const known = new Set(ex.hoods.data?.map((n) => n.id) ?? []);
-  return (
-    <div className="rounded-[18px] bg-paper-raised p-1.5 ring-1 ring-line">
-      <p className="px-2 pb-1 pt-1.5 text-[12.5px] font-[560] text-ink-3">The ranking for your taste in {cityName(ex.state.city)}</p>
-      <ol>
-        {hoods.slice(0, 3).map((n, i) => (
-          <li key={n.id}>
-            <button
-              onClick={() => {
-                if (known.has(n.id)) ex.patch([{ op: "select_neighborhood", id: n.id }]);
-                goTo("/explore");
-              }}
-              className="group flex w-full items-center gap-2.5 rounded-[12px] px-2 py-2 text-left transition-colors hover:bg-paper-sunk"
-            >
-              <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${i === 0 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{n.rank}</span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[15px] font-[600] tracking-[-0.01em] text-ink">{n.name}</span>
-                {n.matchedTags.length > 0 && <span className="block truncate text-[12px] text-ink-3">{n.matchedTags.slice(0, 3).join(", ")}</span>}
-              </span>
-              <MatchValue score={n.score} />
-              <ArrowRight size={14} className="shrink-0 text-ink-3 transition-transform group-hover:translate-x-0.5 group-hover:text-ink" />
-            </button>
-          </li>
-        ))}
-      </ol>
-      <BelowNeutralNote show={hoods.some((n) => !!n.rankingNote)} className="mx-1 mb-1 mt-1" />
-    </div>
-  );
-}
-
-const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
-
-/** The options a plan card was built with. The contract's card carries only the itinerary today; when the
- *  backend adds the PlanRequest fields (as `options`, or flat on the card) they are picked up here. */
-type PlanCardExtras = { options?: PlanOptions } & PlanOptions;
-function planCardOptions(card: Extract<AgentCard, { kind: "plan" }>): PlanOptions {
-  const extra = card as typeof card & PlanCardExtras;
-  const src = extra.options ?? extra;
-  const list = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
-  return {
-    excludeCategories: list<Category>(src.excludeCategories).filter((c) => (CATEGORIES as readonly string[]).includes(c)),
-    excludeTags: list<string>(src.excludeTags).filter((t) => typeof t === "string" && t.trim()),
-    include: list<string>(src.include ?? (src as { mustInclude?: unknown }).mustInclude).filter((t) => typeof t === "string" && t.trim()),
+  const onOpenVisit = (card: Extract<AgentCardV2, { kind: "visit" }>) => {
+    if (ex.openVisit) ex.openVisit(card.result, visitAreaIds(ex, card, turn));
+    else ex.showPlan(card.result.itinerary, {});
+    goTo("/explore/trip");
   };
-}
-
-/** The trip the assistant built: day by day, with what it had to adapt and why, and a way into the Trip screen. */
-function PlanCard({ itinerary, options }: { itinerary: Itinerary; options: PlanOptions }) {
-  const ex = useExplore();
-  const goTo = useGoTo();
-  const city = cityName(ex.state.city);
-  const days = itinerary.days;
-  const stops = days.reduce((n, d) => n + d.stops.length, 0);
   return (
-    <div data-testid="plan-card">
-      <div className="rounded-[18px] bg-paper-raised p-3.5 ring-1 ring-line">
-        <p className="text-[12.5px] font-[560] text-ink-3">
-          {days.length === 1 ? "One day" : `${days.length} days`} in {city}, {stops} {stops === 1 ? "stop" : "stops"}
-        </p>
-        <ol className="mt-2 space-y-3">
-          {days.map((d, i) => {
-            const adapted = stopReasonLines(d.stops.flatMap((s) => s.reasonCodes ?? []));
-            const notes = dayNoteLines(d, city);
-            return (
-              <li key={i} className={i ? "border-t border-line pt-3" : ""}>
-                <p className="flex items-baseline justify-between gap-2">
-                  <span className="min-w-0 text-[15px] font-[630] tracking-[-0.01em] text-ink">
-                    Day {i + 1}
-                    {d.weekday ? `, ${cap(d.weekday)}` : ""}
-                    <span className="font-[450] text-ink-2"> in {d.neighborhood}</span>
-                  </span>
-                  <span className="tnum shrink-0 text-[12px] text-ink-3">{d.stops.length ? `${d.stops.length} ${d.stops.length === 1 ? "stop" : "stops"}` : "no stops"}</span>
-                </p>
-                {d.stops.length > 0 && (
-                  <ul className="mt-1.5 space-y-0.5">
-                    {d.stops.slice(0, 4).map((s) => (
-                      <li key={`${s.place.id}-${s.time}`} className="flex gap-2 text-[13px] leading-snug">
-                        <span className="tnum w-10 shrink-0 font-[600] text-ink-2">{s.time}</span>
-                        <span className="min-w-0 truncate text-ink">{s.place.name}</span>
-                      </li>
-                    ))}
-                    {d.stops.length > 4 && <li className="pl-12 text-[12px] text-ink-3">and {d.stops.length - 4} more</li>}
-                  </ul>
-                )}
-                {(notes.length > 0 || adapted.length > 0) && (
-                  <ul className="mt-1.5 space-y-0.5 text-[12px] leading-snug text-ink-2">
-                    {notes.map((l) => (
-                      <li key={l}>{l}</li>
-                    ))}
-                    {adapted.length > 0 && <li className="text-ink-3">Adapted stops: {adapted.map((a) => a.toLowerCase()).join("; ")}.</li>}
-                  </ul>
-                )}
-              </li>
-            );
-          })}
-        </ol>
-        <p className="mt-2.5 text-[11.5px] text-ink-3">Times include approximate walking between stops.</p>
-      </div>
-      <button
-        onClick={() => {
-          ex.showPlan(itinerary, options);
-          goTo("/explore/trip");
-        }}
-        className="mt-1.5 flex items-center gap-1.5 rounded-[9px] px-2 py-1 text-[13px] font-[600] text-you-deep transition-colors hover:bg-you-soft/60"
-      >
-        <CalendarDays size={14} /> Open trip <ArrowRight size={13} />
-      </button>
-    </div>
-  );
-}
-
-function OpenOnMap({ onClick }: { onClick: () => void }) {
-  return (
-    <button onClick={onClick} className="mt-1.5 flex items-center gap-1.5 rounded-[9px] px-2 py-1 text-[13px] font-[600] text-you-deep transition-colors hover:bg-you-soft/60">
-      <MapIcon size={14} /> Open on the map <ArrowRight size={13} />
-    </button>
-  );
-}
-
-function Card({ card }: { card: AgentCard }) {
-  const features = useFeatures();
-  const goTo = useGoTo();
-  if (card.kind === "ranking") return <RankingCard hoods={card.neighborhoods} />;
-  if (card.kind === "plan") return <PlanCard itinerary={card.itinerary} options={planCardOptions(card)} />;
-  if (card.kind === "home")
-    return (
-      <div>
-        <HomeCard result={card.result} compact />
-        <OpenOnMap
-          onClick={() => {
-            features.showHome(card.result);
-            goTo("/explore/home");
-          }}
-        />
-      </div>
-    );
-  if (card.kind === "spot")
-    return (
-      <div>
-        <SpotCard result={card.result} compact />
-        <OpenOnMap
-          onClick={() => {
-            features.showSpot(card.result);
-            goTo("/explore/address");
-          }}
-        />
-      </div>
-    );
-  if (card.kind !== "decides") return null;
-  return (
-    <div>
-      <DecidesCard result={card.result} compact />
-      <OpenOnMap
-        onClick={() => {
-          features.showDecides(card.result);
-          goTo("/explore/why");
-        }}
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-2.5" data-testid="assistant-turn">
+      {turn.retryOf && <p className="text-[12px] font-[560] text-ink-3">Trying one step again</p>}
+      <AgentTurnV2
+        events={turn.events ?? []}
+        currentRevision={ex.revision}
+        stopped={turn.stopped}
+        ended={!turn.pending}
+        onRetryGoal={ex.retryGoal && turn.turnId && !ex.agentBusy ? (goalId) => void ex.retryGoal!(turn.turnId!, goalId) : undefined}
+        handlers={{ onOpenVisit }}
+        hideTurnErrors={!!turn.error}
       />
-    </div>
+      {turn.conflict && <p className="text-[12.5px] text-ink-3">You changed your map while this ran, so the assistant&apos;s own changes were not applied.</p>}
+      {turn.error && (
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="text-[13.5px] text-[var(--err)]">{turn.error}</p>
+          {retry && (
+            <button onClick={retry} className="flex items-center gap-1 rounded-[8px] px-2 py-1 text-[13px] font-[580] text-ink-2 hover:bg-paper-sunk hover:text-ink">
+              <RotateCcw size={13} /> Try again
+            </button>
+          )}
+        </div>
+      )}
+    </motion.div>
   );
 }
 
 function Turn({ turn, retry }: { turn: ChatTurn; retry?: () => void }) {
+  if (turn.role === "assistant" && turn.events?.some((e) => e.type !== "patch")) return <TurnV2 turn={turn} retry={retry} />;
   if (turn.role === "user")
     return (
       <motion.p
@@ -274,33 +129,24 @@ function Turn({ turn, retry }: { turn: ChatTurn; retry?: () => void }) {
         {turn.text}
       </motion.p>
     );
-  // cards come in before the words; show the words first so the card reads as the evidence
-  // listed last-shown first: a plan, the end of a chain, sits at the bottom
-  const order: AgentCard["kind"][] = ["plan", "ranking", "home", "spot", "decides"];
-  const cards = [...turn.cards].sort((a, b) => order.indexOf(b.kind) - order.indexOf(a.kind));
+  // a plain line from Homing (what a screenshot added), or a turn that ended before any event arrived
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-2.5" data-testid="assistant-turn">
-      <Steps turn={turn} />
       {turn.pending && !turn.text && (
         <div className="flex items-center gap-2 text-[13px] text-ink-3">
-          <Spinner size={13} /> {turn.trace.length ? "Still working" : "Reading your question"}
+          <Spinner size={13} /> Reading your question
         </div>
       )}
+      <WaitNote active={!!turn.pending} />
       {turn.text && (
         <p data-testid="assistant-reply" className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink [overflow-wrap:anywhere]">
           {turn.text}
-          {turn.pending && <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[3px] animate-pulse bg-ink-3" aria-hidden />}
         </p>
       )}
-      {cards.map((c, i) => (
-        <motion.div key={`${c.kind}-${i}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={spring}>
-          <Card card={c} />
-        </motion.div>
-      ))}
-      {turn.stopped && <p className="text-[12.5px] text-ink-3">You stopped this answer. Anything Homing had already changed on the map stays.</p>}
+      {turn.stopped && <p className="text-[12.5px] text-ink-3">You stopped this answer before it started.</p>}
       {turn.error && (
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="text-[13.5px] text-err">{turn.error}</p>
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="text-[13.5px] text-[var(--err)]">{turn.error}</p>
           {retry && (
             <button onClick={retry} className="flex items-center gap-1 rounded-[8px] px-2 py-1 text-[13px] font-[580] text-ink-2 hover:bg-paper-sunk hover:text-ink">
               <RotateCcw size={13} /> Try again
@@ -394,11 +240,17 @@ function Composer({ autoFocus }: { autoFocus: boolean }) {
         maxLength={MAX}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), send());
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            send();
+          }
         }}
         onPaste={(e) => {
           const img = [...e.clipboardData.files].find((f) => f.type.startsWith("image/"));
-          if (img) (e.preventDefault(), readImage(img));
+          if (img) {
+            e.preventDefault();
+            readImage(img);
+          }
         }}
         placeholder={reading ? "Reading your screenshot" : "Ask about neighborhoods, an address, or your plan"}
         aria-label="Message Homing"
@@ -447,6 +299,26 @@ function Suggestions({ big }: { big?: boolean }) {
           {s}
         </motion.button>
       ))}
+    </div>
+  );
+}
+
+/** The rules the assistant keeps for the rest of the conversation ("no bars", "$$ with known prices"). */
+function SessionRules() {
+  const ex = useAgentStore();
+  const mobile = useIsMobile();
+  const list = ex.constraints ?? [];
+  if (!list.length) return null;
+  return (
+    <div className="mb-2 px-1">
+      <ConstraintChips
+        constraints={list}
+        label={mobile ? null : "Kept for the rest of this conversation"}
+        oneLine={mobile}
+        onRemove={ex.removeConstraint ? (c) => ex.removeConstraint!(c.id) : undefined}
+        disabled={ex.agentBusy}
+        testId="session-rules"
+      />
     </div>
   );
 }
@@ -516,7 +388,7 @@ function Conversation({ onShowMap }: { onShowMap?: () => void }) {
           <div className="pt-6">
             <h3 className="text-[26px] font-[680] leading-[1.15] tracking-[-0.03em]">Ask Homing about {city}</h3>
             <p className="mt-2 max-w-[440px] text-[14.5px] leading-relaxed text-ink-2">
-              Say what you want in your own words. Homing can change your map, explain why a neighborhood ranks where it does, check a flat&apos;s address, find the part of {city} that feels like a place you used to live, and plan your first days.
+              Describe the move in your own words: what you love, a neighborhood you lived in, an address you are looking at. Homing lists what it will do, checks each result against what you asked, and tells you plainly what it could not confirm.
             </p>
             <div className="mt-5">
               <Suggestions big />
@@ -533,8 +405,9 @@ function Conversation({ onShowMap }: { onShowMap?: () => void }) {
       </div>
 
       <div className="px-4 pb-4 pt-1">
+        <SessionRules />
         <Composer autoFocus={empty} />
-        <p className="mt-1.5 px-1 text-[11.5px] text-ink-3">Enter sends, Shift and Enter starts a new line. You can drop a screenshot of a playlist or watchlist here.</p>
+        <p className="mt-1.5 hidden px-1 text-[11.5px] text-ink-3 md:block">Enter sends, Shift and Enter starts a new line. You can drop a screenshot of a playlist or watchlist here.</p>
       </div>
     </div>
   );
@@ -545,6 +418,8 @@ export function AssistantScreen() {
   const mobile = useIsMobile();
   const [showMap, setShowMap] = useState(false);
   const ex = useExplore();
+  const last = ex.chat[ex.chat.length - 1];
+  const busyStep = ex.agentBusy && last?.events?.length ? liveSteps(deriveTurn(last.events).steps, 1)[0]?.text : null;
   if (mobile)
     return (
       <AnimatePresence initial={false} mode="popLayout">
@@ -555,7 +430,7 @@ export function AssistantScreen() {
               className="flex h-12 w-full items-center justify-center gap-2 rounded-[16px] bg-ink text-[15px] font-[580] text-paper shadow-[var(--shadow-overlay)]"
             >
               {ex.agentBusy ? <Spinner size={15} /> : <MessagesSquare size={17} />}
-              {ex.agentBusy ? "Homing is answering. Back to the conversation" : "Back to the conversation"}
+              <span className="min-w-0 truncate">{ex.agentBusy ? (busyStep ? busyStep : "Homing is working. Back to the conversation") : "Back to the conversation"}</span>
             </button>
           </motion.div>
         ) : (

@@ -56,7 +56,7 @@ export function placeClassifications(row: QlooRecord): string[] {
   }))];
 }
 
-export function placeFromRow(row: QlooRecord, category: Category, tags: TagRef[]): Place | null {
+export function placeFromRow(row: QlooRecord, category: Category, tags: TagRef[], classifications?: string[]): Place | null {
   const id = string(row.entity_id);
   const name = string(row.name);
   const point = coordinates(row);
@@ -81,7 +81,7 @@ export function placeFromRow(row: QlooRecord, category: Category, tags: TagRef[]
     description: string(properties.short_description) ?? (string(properties.description) ?? string(row.description))?.slice(0, 160),
     mapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([name, address].filter(Boolean).join(", "))}`,
     neighborhood: neighborhoodName(row), tags: records(row.tags).map(tagRef).filter((tag): tag is TagRef => !!tag),
-    classifications: placeClassifications(row) };
+    classifications: classifications ?? placeClassifications(row) };
 }
 
 /** "SALA DE ARTE PÚBLICO SIQUEIROS" reads as "Sala De Arte Público Siqueiros"; mixed case is left alone. */
@@ -106,26 +106,34 @@ export function comparePlaces(a: Place, b: Place): number {
   return b.affinity - a.affinity || Number(a.priceLevel === undefined) - Number(b.priceLevel === undefined) || a.id.localeCompare(b.id);
 }
 
-export function categoryStrength(row: QlooRecord, category: Category): number {
-  const aliases: Record<Category, string[]> = {
+const CATEGORY_ALIASES: Record<Category, string[]> = {
     coffee: [...CATEGORY_TAGS.coffee, "urn:tag:genre:place:restaurant:cafe", "urn:tag:genre:place:restaurant:coffee_roastery"],
     food: [...CATEGORY_TAGS.food, "urn:tag:genre:place:restaurant"],
     drinks: [...CATEGORY_TAGS.drinks, "urn:tag:genre:place:restaurant:wine_bar", "urn:tag:genre:place:restaurant:cocktail_bar", "urn:tag:genre:place:pub"],
     culture: [...CATEGORY_TAGS.culture, "urn:tag:genre:place:art_museum", "urn:tag:genre:place:concert_hall", "urn:tag:genre:place:performing_arts_theater", "urn:tag:genre:place:cultural_center", "urn:tag:genre:place:tourist_attraction", "urn:tag:genre:place:historical_landmark", "urn:tag:genre:place:library"],
     stay: CATEGORY_TAGS.stay,
-  };
+};
+function categoryStrengthFromTags(tags: QlooRecord[], category: Category): number {
   let best = 0;
-  for (const tag of [...records(row.tags), { ...record(record(row.properties).primary_genre), primary: true }]) {
+  for (const tag of tags) {
     const id = string(tag.id) ?? string(tag.tag_id) ?? "";
-    for (const allowed of aliases[category]) if (id === allowed || id.startsWith(`${allowed}:`))
+    for (const allowed of CATEGORY_ALIASES[category]) if (id === allowed || id.startsWith(`${allowed}:`))
       best = Math.max(best, (tag.primary ? 100 : 0) + allowed.split(":").length + unit(tag.weight));
   }
   return best;
 }
+function categoryTags(row: QlooRecord): QlooRecord[] {
+  return [...records(row.tags), { ...record(record(row.properties).primary_genre), primary: true }]
+    .filter(tag => /^urn:tag:(?:genre|category):place(?::|$)/.test(string(tag.id) ?? string(tag.tag_id) ?? ""));
+}
+export function categoryStrength(row: QlooRecord, category: Category): number {
+  return categoryStrengthFromTags(categoryTags(row), category);
+}
 
 /** A primary genre outranks secondary tags; specificity breaks overlaps such as restaurant/bar. */
 export function bestCategory(row: QlooRecord): Category | null {
-  const ranked = CATEGORIES.map((category) => ({ category, strength: categoryStrength(row, category) }))
+  const tags = categoryTags(row);
+  const ranked = CATEGORIES.map((category) => ({ category, strength: categoryStrengthFromTags(tags, category) }))
     .sort((a, b) => b.strength - a.strength || CATEGORIES.indexOf(a.category) - CATEGORIES.indexOf(b.category));
   return ranked[0].strength > 0 ? ranked[0].category : null;
 }

@@ -1,168 +1,146 @@
 "use client";
 
 import { useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, Plus, RefreshCw, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { activeLoves } from "@/shared/contracts";
-import { useExplore, type CityRun } from "./store";
-import { Button, Skeleton, Spinner } from "@/components/ui/primitives";
+import { useExplore } from "./store";
+import { Button, Segmented, Skeleton, Spinner } from "@/components/ui/primitives";
 import { CityPicker, cityName } from "@/components/ui/CityPicker";
+import { useFeatures } from "@/components/screens/features";
+import { ComparisonCard } from "@/components/screens/decision";
+import { ErrorNote } from "@/components/screens/shared";
 
-const CAT: Record<string, string> = { coffee: "coffee", food: "food", drinks: "drinks", culture: "culture", stay: "stay" };
+const MAX = 3;
+type Basis = "taste" | "home";
 
-/** "Where should I go?" The same  taste scored across up to five cities, with each city's best start. */
+/**
+ * Two (at most three) cities checked with one method, side by side. The map keeps its city: opening a city's map
+ * is a separate, explicit action. Each city has its own result or its own error.
+ */
 export function CityCompare({ onOpenCity }: { onOpenCity: (city: string) => void }) {
   const ex = useExplore();
-  const [list, setList] = useState<string[]>(() => (ex.cities.asked.length ? ex.cities.asked : [ex.state.city, "Berlin", "Mexico City"].filter((c, i, a) => a.findIndex((x) => cityName(x).toLowerCase() === cityName(c).toLowerCase()) === i)));
+  const f = useFeatures();
+  const c = f.cities;
+  const here = cityName(ex.state.city);
+  const [list, setList] = useState<string[]>(() => (c.asked.length ? c.asked : [here, here.toLowerCase() === "berlin" ? "Lisbon" : "Berlin"]));
   const [adding, setAdding] = useState("");
+  const [basis, setBasis] = useState<Basis>(() => (c.source ? "home" : f.home.request ? "home" : "taste"));
+  const [srcCity, setSrcCity] = useState(() => c.source?.city ?? f.home.request?.city ?? "Berlin");
+  const [srcHood, setSrcHood] = useState(() => c.source?.neighborhood ?? f.home.request?.neighborhood ?? "Kreuzberg");
   const loves = activeLoves(ex.state.loves);
+  const canRun = list.length >= 2 && !c.loading && (basis === "home" ? !!srcCity.trim() && !!srcHood.trim() : loves.length > 0);
+  const run = () => void f.compareCities(list, basis === "home" ? { city: srcCity.trim(), neighborhood: srcHood.trim() } : null);
 
-  const { runs, running } = ex.cities;
-  // finished cities first, best first; the index is relative to the best city so far and moves as cities land
-  const done = runs
-    .filter((r): r is CityRun & { data: NonNullable<CityRun["data"]> } => r.status === "done" && !!r.data)
-    .sort((a, b) => b.data.score - a.data.score || b.data.depth - a.data.depth);
-  const waiting = runs.filter((r) => r.status === "queued" || r.status === "loading");
-  const failed = runs.filter((r) => r.status === "error");
-  const best = done[0]?.data;
-  const top = Math.max(0.0001, ...done.map((r) => r.data.score));
   return (
     <section aria-label="Compare cities">
-      <div>
-        <h2 className="text-[22px] font-[660] leading-tight tracking-[-0.02em]">Which city fits your taste</h2>
-        <p className="mt-1.5 text-[14px] leading-relaxed text-ink-2">
-          Homing scores how strongly each city&apos;s places match {loves.length ? loves.map((l) => l.chosen.name).slice(0, 3).join(", ") : "what you love"}, and where you&apos;d start in each.
-        </p>
+      <h2 className="text-[22px] font-[660] leading-tight tracking-[-0.02em]">Two cities, one method</h2>
+      <p className="mt-1.5 text-[14px] leading-relaxed text-ink-2">
+        Check the same old neighborhood or the same taste in two cities. The map stays on {here} until you open another city.
+      </p>
+
+      <div className="mt-4">
+        <Segmented
+          size="sm"
+          label="Compare by"
+          value={basis}
+          onChange={setBasis}
+          options={[
+            { value: "home", label: "Closeness to an old neighborhood" },
+            { value: "taste", label: "Your loves" },
+          ]}
+        />
       </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          {list.map((c) => (
-            <span key={c} className="flex h-10 items-center gap-1 rounded-[11px] bg-paper-sunk pl-3 pr-1 text-[14.5px] font-[560]">
-              {cityName(c)}
-              <button aria-label={`Remove ${c}`} onClick={() => setList((l) => l.filter((x) => x !== c))} className="grid h-8 w-8 place-items-center rounded-[8px] text-ink-3 hover:bg-paper-raised hover:text-ink">
-                <X size={14} />
-              </button>
-            </span>
-          ))}
-          {list.length < 5 && (
-            <div className="flex items-center gap-1.5">
-              <CityPicker
-                key={list.length}
-                className="w-[210px]"
-                value={adding}
-                onChange={(c) => {
-                  setList((l) => (l.some((x) => x.toLowerCase() === c.toLowerCase()) ? l : [...l, c]));
-                  setAdding("");
-                }}
-              />
-              <Plus size={16} className="text-ink-3" />
-            </div>
-          )}
-          <Button variant="primary" size="md" className="ml-auto" disabled={list.length < 2 || !loves.length || running} onClick={() => void ex.compareCities(list)}>
-            {running ? "Comparing" : "Compare"}
-          </Button>
+      {basis === "home" && (
+        <div className="mt-2.5 grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] gap-2">
+          <label className="block">
+            <span className="mb-1 block text-[12.5px] font-[560] text-ink-3">City you lived in</span>
+            <CityPicker value={srcCity} onChange={setSrcCity} />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[12.5px] font-[560] text-ink-3">Neighborhood</span>
+            <input
+              data-testid="compare-source-hood"
+              value={srcHood}
+              onChange={(e) => setSrcHood(e.target.value)}
+              maxLength={80}
+              autoComplete="off"
+              spellCheck={false}
+              className="h-10 w-full rounded-[12px] bg-paper-raised px-3 text-[15px] font-[560] text-ink ring-1 ring-line outline-none focus:ring-2 focus:ring-you"
+            />
+          </label>
         </div>
-        {!loves.length && <p className="mt-3 text-[13.5px] text-err">Add a few things you love first, then compare.</p>}
+      )}
 
-        <div className="mt-6">
-          {running && (
-            <p className="mb-3 flex items-center gap-2 text-[13.5px] leading-snug text-ink-2">
-              <Spinner size={13} className="shrink-0 text-ink-3" />
-              <span>
-                {waiting.length > 0 ? `Mapping your taste in ${waiting.map((r) => cityName(r.city)).join(", ")}. ` : ""}Each city shows as soon as it is scored.
-              </span>
-            </p>
-          )}
-          {best && (
-            <p className="mb-4 text-[16px] text-ink-2">
-              {running || failed.some((r) => r.error?.retryable !== false) ? "So far, your" : "Your"} taste is strongest in <strong className="font-[650] text-ink">{cityName(best.city)}</strong>
-              {best.topNeighborhood ? (
-                <>
-                  , starting in <strong className="font-[650] text-ink">{best.topNeighborhood}</strong>
-                </>
-              ) : null}
-              .
-            </p>
-          )}
-          {runs.length > 0 && (
-            <ol className="grid gap-3 min-[1180px]:grid-cols-2">
-              <AnimatePresence initial={false}>
-                {done.map(({ data: c }, i) => (
-                  <motion.li
-                    key={c.city}
-                    layout
-                    initial={{ opacity: 0, y: 14 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.35, ease: [0.2, 0.8, 0.2, 1] }}
-                    className={`rounded-[20px] p-4 ring-1 ${i === 0 ? "bg-[color-mix(in_oklch,var(--you)_7%,var(--paper-raised))] ring-[color-mix(in_oklch,var(--you)_30%,transparent)]" : "bg-paper-raised ring-line"}`}
-                  >
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="flex min-w-0 items-baseline gap-2">
-                        <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${i === 0 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{i + 1}</span>
-                        <span className="truncate text-[20px] font-[650] tracking-[-0.02em]">{cityName(c.city)}</span>
-                      </span>
-                      <span className="tnum text-[20px] font-[660]" title="Relative index: the best city in this comparison is 100">
-                        {Math.round((c.score / top) * 100)}
-                      </span>
-                    </div>
-                    <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-paper-sunk">
-                      <motion.div className="h-full rounded-full bg-you" initial={{ width: 0 }} animate={{ width: `${(c.score / top) * 100}%` }} transition={{ duration: 0.7, ease: [0.2, 0.8, 0.2, 1] }} />
-                    </div>
-                    <p className="mt-2.5 text-[13.5px] leading-snug text-ink-2">
-                      {c.topNeighborhood ? (
-                        <>
-                          Start in <b className="font-[600] text-ink">{c.topNeighborhood}</b>.{" "}
-                        </>
-                      ) : null}
-                      {c.matchedTags.length ? `Places feel ${c.matchedTags.slice(0, 3).join(", ").toLowerCase()}.` : ""}
-                    </p>
-                    {c.topPlaces.length > 0 && (
-                      <p className="mt-1.5 text-[12.5px] text-ink-3">{c.topPlaces.slice(0, 3).map((p) => `${p.name} (${CAT[p.category] ?? p.category})`).join(", ")}</p>
-                    )}
-                    {c.sparse && <p className="mt-1.5 text-[12.5px] text-ink-3">Thin data for this city, treat the score as a rough hint.</p>}
-                    <button onClick={() => onOpenCity(c.city)} className="mt-3 flex items-center gap-1 text-[13.5px] font-[600] text-you-deep hover:underline">
-                      Open the map of {cityName(c.city)} <ArrowRight size={14} />
-                    </button>
-                  </motion.li>
-                ))}
-                {waiting.map((r) => (
-                  <motion.li key={r.city} layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} aria-busy="true" className="rounded-[20px] p-4 ring-1 ring-line">
-                    <p className="flex items-center gap-2 text-[17px] font-[620] tracking-[-0.015em] text-ink-2">
-                      {r.status === "loading" ? <Spinner size={14} className="text-ink-3" /> : <span className="h-3.5 w-3.5 rounded-full ring-2 ring-line-strong" />}
-                      {cityName(r.city)}
-                      <span className="text-[12.5px] font-[500] tracking-normal text-ink-3">{r.status === "loading" ? "scoring" : "next"}</span>
-                    </p>
-                    <Skeleton className="mt-3 h-2" />
-                    <Skeleton className="mt-3 h-[52px]" />
-                  </motion.li>
-                ))}
-                {failed.map((r) => (
-                  <motion.li
-                    key={r.city}
-                    layout
-                    initial={{ opacity: 0, y: 14 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    data-testid="city-error"
-                    className="rounded-[20px] bg-paper-raised p-4 ring-1 ring-line"
-                  >
-                    <p className="text-[18px] font-[640] tracking-[-0.02em] text-ink-2">{cityName(r.city)}</p>
-                    <p className="mt-1.5 text-[13.5px] leading-snug text-ink-2">{r.error?.message ?? "Homing couldn't score this city."}</p>
-                    {r.error?.retryable !== false && (
-                      <Button size="sm" variant="secondary" className="mt-2.5" onClick={() => void ex.retryCity(r.city)}>
-                        <RefreshCw size={14} /> Try {cityName(r.city)} again
-                      </Button>
-                    )}
-                  </motion.li>
-                ))}
-              </AnimatePresence>
-            </ol>
-          )}
-          {done.length > 0 && (
-            <p className="mt-4 text-[12.5px] leading-relaxed text-ink-3">
-              The index compares cities on equal terms: among the places Qloo picks for your taste in each city, how often they carry the atmosphere you prefer. The best city {running ? "so far " : ""}is 100.
-            </p>
-          )}
-        </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {list.map((city) => (
+          <span key={city} className="flex h-10 items-center gap-1 rounded-[11px] bg-paper-sunk pl-3 pr-1 text-[14.5px] font-[560]">
+            {cityName(city)}
+            <button
+              aria-label={`Remove ${city}`}
+              onClick={() => setList((l) => l.filter((x) => x !== city))}
+              className="grid h-9 w-9 place-items-center rounded-[8px] text-ink-3 hover:bg-paper-raised hover:text-ink"
+            >
+              <X size={14} />
+            </button>
+          </span>
+        ))}
+        {list.length < MAX && (
+          <div className="flex items-center gap-1.5">
+            <CityPicker
+              key={list.length}
+              className="w-[190px]"
+              value={adding}
+              onChange={(city) => {
+                setList((l) => (l.some((x) => x.toLowerCase() === city.toLowerCase()) ? l : [...l, city]));
+                setAdding("");
+              }}
+            />
+            <Plus size={16} className="text-ink-3" />
+          </div>
+        )}
+        <Button data-testid="compare-cities" variant="primary" size="md" className="ml-auto" disabled={!canRun} onClick={run}>
+          {c.loading ? <Spinner size={15} /> : null}
+          {c.loading ? "Checking" : "Compare"}
+        </Button>
+      </div>
+      {basis === "taste" && !loves.length && (
+        <p className="mt-2.5 text-[13.5px] text-ink-2">Add a few things you love on the Map screen first, or compare by an old neighborhood.</p>
+      )}
+
+      <div className="mt-5">
+        {c.error && <ErrorNote message={c.error.message} onRetry={c.error.retryable ? run : undefined} />}
+        {c.loading && !c.data && (
+          <div className="space-y-2.5">
+            <p className="text-[13.5px] text-ink-2">Checking {list.map(cityName).join(" and ")} with the same method. A city seen for the first time takes a few seconds.</p>
+            <Skeleton className="h-[140px]" />
+            <Skeleton className="h-[140px]" />
+          </div>
+        )}
+        {c.data && (
+          <div data-testid="comparison-result" data-stale={c.stale || undefined}>
+            {c.stale && !c.loading && (
+              <div
+                data-testid="comparison-stale"
+                className="mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-[12px] bg-paper-sunk px-3 py-2 text-[13px] text-ink-2"
+              >
+                <span>From before your last change.</span>
+                <button onClick={run} disabled={!canRun} className="min-h-8 font-[600] text-you-deep hover:underline disabled:text-ink-3">
+                  Compare again
+                </button>
+              </div>
+            )}
+            <div className={`transition-opacity ${c.loading || c.stale ? "opacity-55" : ""}`}>
+              <ComparisonCard view={c.data} onOpenCity={onOpenCity} sourceName={c.source?.neighborhood ?? null} />
+              <p className="mt-3 text-[12.5px] leading-relaxed text-ink-3">
+                {c.source
+                  ? `Each city's number is the middle of its three closest areas to ${c.source.neighborhood}, on the same 0 to 100 scale. Differences of a few points are not a real difference.`
+                  : "Each city is checked for your loves with the same method. The number is an overlap index from 0 to 100, not a chance that you will like living there."}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

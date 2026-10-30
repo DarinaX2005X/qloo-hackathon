@@ -2,7 +2,8 @@ import { z } from "zod";
 import { haversine } from "@/server/engine/geo";
 import { apiError } from "@/shared/contracts";
 
-export type Locality = { name: string; label: string; query: string; center: [number, number]; houseNumber?: string; street?: string; streetLevel?: boolean };
+export const LOCALITY_RESOLUTION_VERSION = "qualified-city-before-village-v2";
+export type Locality = { name: string; label: string; query: string; center: [number, number]; houseNumber?: string; street?: string; streetLevel?: boolean; localityType?: "city" | "town" | "village"; population?: number };
 export const LonLat = z.tuple([z.number().min(-180).max(180), z.number().min(-90).max(90)]);
 type Options = { bias?: [number, number]; localitiesOnly?: boolean };
 const BY_REGION = new Set(["United States", "Canada", "Australia", "Brazil", "Mexico", "India"]);
@@ -17,7 +18,7 @@ const PhotonFeature = z.object({
     osm_key: z.string().optional(), osm_value: z.string().optional() }),
 });
 const MeteoPlace = z.object({ name: z.string(), latitude: z.number(), longitude: z.number(),
-  feature_code: z.string().optional(), country: z.string().optional(), admin1: z.string().optional() });
+  feature_code: z.string().optional(), country: z.string().optional(), admin1: z.string().optional(), population: z.number().optional() });
 
 function locality(name: string | undefined, state: string | undefined, country: string | undefined, center: [number, number]): Locality | null {
   if (!name || !country || !LonLat.safeParse(center).success) return null;
@@ -30,15 +31,17 @@ export async function photon(q: string, options: Options = { localitiesOnly: tru
   url.search = new URLSearchParams({ q, limit: "10", lang: "en" }).toString();
   if (options.localitiesOnly) for (const type of ["city", "town", "village"]) url.searchParams.append("osm_tag", `place:${type}`);
   if (options.bias) { url.searchParams.set("lon", String(options.bias[0])); url.searchParams.set("lat", String(options.bias[1])); }
-  const res = await fetch(url, { signal: AbortSignal.timeout(3500), headers: { "user-agent": "Homing (hackathon demo)" } });
+  const res = await fetch(url, { signal: AbortSignal.timeout(3500), headers: { "user-agent": "Homing (hackathon demo)" }, next: { revalidate: options.localitiesOnly ? 86400 : 300 } });
   if (!res.ok) return [];
   const body = z.object({ features: z.array(z.unknown()).default([]) }).parse(await res.json());
   return body.features.flatMap((raw) => {
     const parsed = PhotonFeature.safeParse(raw);
     if (!parsed.success) return [];
     const { properties: p, geometry } = parsed.data;
-    if (options.localitiesOnly) return p.osm_key === "place" && ["city", "town", "village"].includes(p.osm_value ?? "")
-      ? locality(p.name, p.state, p.country, geometry.coordinates) ?? [] : [];
+    if (options.localitiesOnly) {
+      const item = p.osm_key === "place" && ["city", "town", "village"].includes(p.osm_value ?? "") ? locality(p.name, p.state, p.country, geometry.coordinates) : null;
+      return item ? [{ ...item, localityType: p.osm_value as "city" | "town" | "village" }] : [];
+    }
     const street = [p.street, p.housenumber].filter(Boolean).join(" ");
     const name = street || p.name;
     if (!name) return [];
@@ -51,7 +54,7 @@ export async function photon(q: string, options: Options = { localitiesOnly: tru
 export async function meteo(q: string, options: Options = { localitiesOnly: true }): Promise<Locality[]> {
   const url = new URL("https://geocoding-api.open-meteo.com/v1/search");
   url.search = new URLSearchParams({ name: q, count: "10", language: "en", format: "json" }).toString();
-  const res = await fetch(url, { signal: AbortSignal.timeout(3500) });
+  const res = await fetch(url, { signal: AbortSignal.timeout(3500), next: { revalidate: options.localitiesOnly ? 86400 : 300 } });
   if (!res.ok) return [];
   const body = z.object({ results: z.array(z.unknown()).default([]) }).parse(await res.json());
   return body.results.flatMap((raw) => {
@@ -59,7 +62,8 @@ export async function meteo(q: string, options: Options = { localitiesOnly: true
     if (!parsed.success || (options.localitiesOnly && !/^(?:PPL|PPLA[1-5]?|PPLC|PPLG)$/.test(parsed.data.feature_code ?? ""))) return [];
     const p = parsed.data;
     const result = locality(p.name, p.admin1, p.country, [p.longitude, p.latitude]);
-    return result ? { ...result, ...(options.localitiesOnly ? {} : { label: result.query }) } : [];
+    const localityType = /^PPLA|^PPLC/.test(p.feature_code ?? "") || (p.population ?? 0) >= 100000 ? "city" as const : (p.population ?? 0) >= 10000 ? "town" as const : "village" as const;
+    return result ? { ...result, population: p.population, ...(options.localitiesOnly ? { localityType } : { label: result.query }) } : [];
   });
 }
 
@@ -72,7 +76,8 @@ export async function validateCity(query: string): Promise<Locality> {
   const hit = cityCache.get(key);
   if (hit && hit.expires > Date.now()) return hit.value;
   const [a, b] = await Promise.all([photon(query).catch(() => []), meteo(name).catch(() => [])]);
-  const found = [...a, ...b].find(item => relevantGeocode(item, name));
+  const qualified = rankedLocalities([...a, ...b], query);
+  const found = qualified.find(item => normalized(item.name) === normalized(name));
   if (!found) throw apiError("not_found", `We couldn't find a city, town or village named ${query.trim()}. Check the spelling or pick it from the list.`);
   cityCache.set(key, { expires: Date.now() + 86400000, value: found });
   if (cityCache.size > 500) cityCache.delete(cityCache.keys().next().value!);
@@ -105,6 +110,16 @@ export async function reverseGeocode(point: [number, number]): Promise<string | 
 }
 
 function normalized(text: string): string { return text.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim(); }
+
+/** Explicit regions disambiguate namesakes; cities precede villages for a bare city name. */
+export function rankedLocalities(items: Locality[], query: string): Locality[] {
+  const [name, ...regions] = query.split(",").map(normalized).filter(Boolean);
+  const regionAliases: Record<string, string> = { usa: "united states", us: "united states", uk: "united kingdom" };
+  const qualifiers = regions.map(r => regionAliases[r] ?? r);
+  const candidates = items.filter(item => qualifiers.every(region => normalized(`${item.label} ${item.query}`).includes(region)));
+  const kindRank = (item: Locality) => item.localityType === "city" ? 3 : item.localityType === "town" ? 2 : item.localityType === "village" ? 1 : 0;
+  return candidates.sort((a, b) => Number(normalized(b.name) === name) - Number(normalized(a.name) === name) || kindRank(b) - kindRank(a));
+}
 
 export function relevantGeocode(result: Locality, query: string): boolean {
   const words = normalized(query.split(",")[0]).split(" ").filter((word) => !/^\d+[a-z]?$/.test(word));

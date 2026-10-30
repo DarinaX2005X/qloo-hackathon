@@ -6,7 +6,6 @@ import type {
   AgentCard,
   AgentEvent,
   Category,
-  CityScore,
   ExploreState,
   Fingerprint,
   Itinerary,
@@ -17,10 +16,23 @@ import type {
   TasteField,
 } from "@/shared/contracts";
 import { activeLoves } from "@/shared/contracts";
+import type {
+  AgentEventV2,
+  AreaDecision,
+  Constraint,
+  GoalState,
+  ResultMeta,
+  SessionMemory,
+  Support,
+  VenueEvidence,
+  VisitResultV2,
+} from "@/shared/contracts-09";
+import { emptySessionMemory } from "@/shared/contracts-09";
 import { applyPatches } from "@/shared/patches";
 import { decodeState, emptyState, encodeState } from "@/lib/state";
 import { pickEntity } from "@/lib/pick";
-import { api, HomingError, streamAgent } from "./api";
+import { api, api2, HomingError, isV2Event, streamAgentV2, type AnyAgentEvent } from "./api";
+import { areaFromNeighborhood, legacyRules, neighborhoodFromArea, venueFromPlace, visitFromItinerary } from "./adapt";
 
 export type Load<T> = { data: T | null; loading: boolean; error: HomingError | null };
 const idle = <T,>(): Load<T> => ({ data: null, loading: false, error: null });
@@ -36,7 +48,50 @@ export type ChatTurn = {
   error?: string;
   /** the person stopped this answer before it finished */
   stopped?: boolean;
+  /** v2: the turn id sent to the server; only events with this id are kept */
+  turnId?: string;
+  /** v2: every validated event of this turn, in arrival order; F3 derives goals, steps and cards from it */
+  events?: AgentEventV2[];
+  /** v2: the state revision this turn's results belong to (moves with the agent's own patches) */
+  revision?: number;
+  /** v2: the person changed the inputs while this turn ran, so its patches were not applied */
+  conflict?: boolean;
+  /** v2: this assistant turn retries one goal of an earlier turn */
+  retryOf?: { turnId: string; goalId: string };
+  /** v2: goals as the server last reported them (from plan and done) */
+  goals?: GoalState[];
 };
+
+/** The analysis behind the map and the shortlist, for one state revision. */
+export type Analysis = {
+  /** v2 meta; null for a legacy answer */
+  meta: ResultMeta | null;
+  support: Support | null;
+  /** areas in rank order; legacy answers are adapted to neutral ranks */
+  areas: AreaDecision[];
+  allCandidateIds: string[];
+  /** true when the route answered the stage-08 shape */
+  legacy: boolean;
+  /** the revision this analysis was computed for */
+  revision: number;
+};
+
+/** "Try this neighborhood": one short visit, with the constraints it was built under. */
+export type VisitSlot = Load<VisitResultV2> & {
+  /** the inputs or constraints changed since this visit was built */
+  stale: boolean;
+  areaIds: string[];
+  from: "planner" | "assistant";
+  legacy: boolean;
+  revision: number;
+  /** stop ids the person removed or swapped out; never planned again in this visit */
+  excludeIds: string[];
+  /** first stop, local hour 6..22 (the visit's own; state.startHour stays the multi-day planner's) */
+  startHour?: number;
+};
+
+/** Which part of the phone sheet the Map screen shows; the tab bar sets it (Map = peek, Shortlist = results). */
+export type MobileSheet = "peek" | "results" | "taste";
 
 /** What a screen draws on the shared map, on top of or instead of the taste terrain. */
 export type MapOverlay = {
@@ -65,10 +120,6 @@ const noRules = (): PlanRules => ({ excludeCategories: [], excludeTags: [] });
 /** The options a plan was built with, as the PlanRequest names them. */
 export type PlanOptions = { excludeCategories?: Category[]; excludeTags?: string[]; include?: string[] };
 
-/** One city of a comparison: scored on its own request, so each card shows as soon as it is ready. */
-export type CityRun = { city: string; status: "queued" | "loading" | "done" | "error"; data?: CityScore; error?: HomingError };
-export type CityCompareState = { asked: string[]; runs: CityRun[]; running: boolean };
-const CITY_CONCURRENCY = 2;
 export type Toast = { id: number; text: string; undo?: () => void };
 
 const RECENT_KEY = "homing.recent";
@@ -82,6 +133,24 @@ const fieldKey = (s: ExploreState) =>
     Math.round(s.discovery * 20),
     s.companion ? activeLoves(s.companion.loves).map((l) => [l.chosen.id, l.weight]) : null,
   ]);
+/** Everything that changes a result: the field signals plus the session constraints. One change = one new revision. */
+export const inputKey = (s: ExploreState, constraints: Constraint[]) =>
+  // the legacy budget is a hard venue constraint on the server, so it is an input too
+  `${fieldKey(s)}|${s.budget ?? ""}|${JSON.stringify([...constraints].sort((a, b) => a.id.localeCompare(b.id)).map((c) => [c.id, c.kind, c.value, c.strength]))}`;
+
+/** The current path with `?s=` set to the state and any other deep-link params (e.g. Home's `from` and `hood`) kept. */
+function urlWith(enc: string) {
+  const q = new URLSearchParams(window.location.search);
+  q.set("s", enc);
+  // keep "s" first so shared links read the same as before
+  const rest = [...q.entries()].filter(([k]) => k !== "s").map(([k, v]) => `&${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("");
+  return `${window.location.pathname}?s=${enc}${rest}`;
+}
+
+const newId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+/** A visit starts in the afternoon unless the person picks another time (PlanRequestV2.startHour, 6..22). */
+export const VISIT_START_HOUR = 14;
+const noVisit = (): VisitSlot => ({ data: null, loading: false, error: null, stale: false, areaIds: [], from: "planner", legacy: false, revision: 0, excludeIds: [] });
 
 function useStore() {
   const [state, setStateRaw] = useState<ExploreState>(() => emptyState());
@@ -96,6 +165,9 @@ function useStore() {
   const [pending, setPending] = useState<Pending>({});
   const [chat, setChat] = useState<ChatTurn[]>([]);
   const [agentBusy, setAgentBusy] = useState(false);
+  const agentBusyRef = useRef(false);
+  const chatRef = useRef(chat);
+  chatRef.current = chat;
   const [category, setCategory] = useState<Category | "all">("all");
   const [activePlace, setActivePlace] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0); // bump to retry
@@ -105,8 +177,6 @@ function useStore() {
   const [openPlace, setOpenPlace] = useState<Place | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
-  const [cities, setCities] = useState<CityCompareState>({ asked: [], runs: [], running: false });
-  const citiesRun = useRef<{ ac: AbortController; seq: number } | null>(null);
   /** where the plan on screen came from: the planner on the Trip screen, or a plan the assistant built */
   const [planFrom, setPlanFrom] = useState<"planner" | "assistant">("planner");
   const [planRules, setPlanRules] = useState<PlanRules>(noRules);
@@ -166,14 +236,14 @@ function useStore() {
     lastPath.current = pathname;
     if (!hydrated) return;
     const enc = encodeState(stateRef.current);
-    if (new URLSearchParams(window.location.search).get("s") !== enc) window.history.replaceState(null, "", `${window.location.pathname}?s=${enc}`);
+    if (new URLSearchParams(window.location.search).get("s") !== enc) window.history.replaceState(null, "", urlWith(enc));
   }, [pathname, hydrated]);
   useEffect(() => {
     if (!hydrated) return;
     const nav = navTo.current;
     if (nav && nav.path !== window.location.pathname && Date.now() - nav.at < 4000) return;
     const enc = encodeState(state);
-    const url = `${window.location.pathname}?s=${enc}`;
+    const url = urlWith(enc);
     const hood = state.neighborhood ?? null;
     const deeper = lastHood.current !== undefined && hood !== null && hood !== lastHood.current;
     lastHood.current = hood;
@@ -199,7 +269,72 @@ function useStore() {
   }, []);
   const setState = useCallback((fn: (s: ExploreState) => ExploreState) => setStateRaw(fn), []);
 
-  // --- field + neighborhoods + fingerprint, debounced on signal changes
+  // --- session constraints (the same list the agent receives as memory.constraints)
+  const [constraints, setConstraints] = useState<Constraint[]>([]);
+  const constraintsRef = useRef(constraints);
+  constraintsRef.current = constraints;
+
+  // --- state revision: one authoritative counter. Any change of the inputs (loves, weights, city, crowd, partner,
+  // constraints) makes a new revision; a result made for an older revision is stale and never overwrites a newer one.
+  // The agent's own patches take the revision the server named (nextRevision), so its later results still match.
+  const ik = inputKey(state, constraints);
+  const [revision, setRevision] = useState(0);
+  const revRef = useRef(0);
+  const revKey = useRef<string | null>(null);
+  /** bumps only for changes the person made (not the agent); an agent turn that sees it move drops its patches */
+  const inputEpoch = useRef(0);
+  useEffect(() => {
+    if (!hydrated) return;
+    if (revKey.current === null || revKey.current === ik) {
+      revKey.current = ik;
+      return;
+    }
+    revKey.current = ik;
+    revRef.current += 1;
+    inputEpoch.current += 1;
+    setRevision(revRef.current);
+  }, [ik, hydrated]);
+  /** Apply a change that the agent made: it takes the server's next revision and does not count as the person's edit. */
+  const agentCommit = useCallback((ops: StatePatch[], nextConstraints: Constraint[] | null, nextRevision?: number, opts: { bump?: boolean } = {}) => {
+    const s1 = ops.length ? applyPatches(stateRef.current, ops) : stateRef.current;
+    const c1 = nextConstraints ?? constraintsRef.current;
+    const key = inputKey(s1, c1);
+    const bump = opts.bump ?? true;
+    if (key !== revKey.current) {
+      revKey.current = key;
+      if (bump) {
+        revRef.current = Math.max(revRef.current + 1, nextRevision ?? 0);
+        setRevision(revRef.current);
+      }
+    } else if (bump && nextRevision !== undefined && nextRevision > revRef.current) {
+      // the server moved the revision without changing the inputs: what is on screen still describes them
+      const from = revRef.current;
+      revRef.current = nextRevision;
+      setRevision(nextRevision);
+      setAnalysis((a) => (a.data && a.data.revision === from ? { ...a, data: { ...a.data, revision: nextRevision } } : a));
+      setVisit((v) => (v.revision === from ? { ...v, revision: nextRevision } : v));
+    }
+    if (ops.length) {
+      stateRef.current = s1;
+      setStateRaw(s1);
+    }
+    if (nextConstraints) {
+      constraintsRef.current = c1;
+      setConstraints(c1);
+    }
+  }, []);
+
+  const setConstraint = useCallback((c: Constraint) => {
+    setConstraints((list) => [...list.filter((x) => x.id !== c.id), c]);
+  }, []);
+  const removeConstraint = useCallback((id: string) => {
+    setConstraints((list) => list.filter((x) => x.id !== id));
+  }, []);
+
+  // --- field + areas + fingerprint, debounced on input changes. Field and areas are asked in parallel; the server
+  // shares one analysis between them, and each lands on its own.
+  const [analysis, setAnalysis] = useState<Load<Analysis>>(idle);
+  const firstAnalysis = useRef(true);
   const fk = fieldKey(state);
   const hasSignals = activeLoves(state.loves).length > 0;
   useEffect(() => {
@@ -208,70 +343,109 @@ function useStore() {
       setField(idle());
       setHoods(idle());
       setPrint(idle());
+      setAnalysis(idle());
       return;
     }
     const ac = new AbortController();
     const t = setTimeout(async () => {
       const s = stateRef.current;
+      const rev = revRef.current;
+      const env = { stateRevision: rev, constraints: constraintsRef.current };
       const city = s.city.trim().toLowerCase();
-      // keep the old terrain on screen while the same city recomputes; a new city starts empty
+      // keep the old terrain on screen while the same city recomputes (marked stale); a new city starts empty
       const fresh = dataCity.current !== city;
       if (fresh) dataCity.current = null;
       setField((f) => ({ data: fresh ? null : f.data, loading: true, error: null }));
       setHoods((h) => ({ data: fresh ? null : h.data, loading: true, error: null }));
+      setAnalysis((a) => ({ data: fresh ? null : a.data, loading: true, error: null }));
       setPrint((p) => ({ ...p, loading: true, error: null }));
+      const current = () => !ac.signal.aborted && revRef.current === rev;
       api.fingerprint(s, ac.signal).then(
-        (data) => setPrint({ data, loading: false, error: null }),
+        (data) => current() && setPrint({ data, loading: false, error: null }),
         (e: HomingError) => e.code !== "aborted" && setPrint((p) => ({ ...p, loading: false, error: e })),
       );
+      const fieldDone = api2.field(s, env, ac.signal).then(
+        (r) => {
+          if (!current()) return false;
+          if (r.v === 2 && r.data.meta.stateRevision !== rev) return false;
+          dataCity.current = city;
+          setField({ data: r.v === 2 ? r.data.field : r.data, loading: false, error: null });
+          return true;
+        },
+        (e: HomingError) => {
+          if (e.code === "aborted" || !current()) return false;
+          setField((f) => ({ ...f, loading: false, error: e }));
+          return false;
+        },
+      );
       try {
-        const f = await api.field(s, ac.signal);
-        dataCity.current = city;
-        setField({ data: f, loading: false, error: null });
-      } catch (e) {
-        const err = e as HomingError;
-        if (err.code === "aborted") return;
-        setField((f) => ({ ...f, loading: false, error: err }));
-        // without a field there is no ranking for this city either
-        setHoods({ data: null, loading: false, error: err });
-        return;
-      }
-      try {
-        const n = await api.neighborhoods(s, ac.signal);
-        setHoods({ data: n, loading: false, error: null });
+        const r = await api2.areas(s, env, ac.signal);
+        if (!current()) return;
+        let a: Analysis;
+        if (r.v === 2) {
+          if (r.data.meta.stateRevision !== rev) return;
+          const areas = [...r.data.areas].sort((x, y) => x.metrics.rank - y.metrics.rank);
+          a = { meta: r.data.meta, support: null, areas, allCandidateIds: r.data.allCandidateIds, legacy: false, revision: rev };
+        } else {
+          const list = r.data.neighborhoods;
+          a = { meta: null, support: null, areas: list.map((n) => areaFromNeighborhood(n, list)), allCandidateIds: list.map((n) => n.id), legacy: true, revision: rev };
+        }
+        setAnalysis({ data: a, loading: false, error: null });
+        setHoods({ data: r.v === 2 ? a.areas.map(neighborhoodFromArea) : r.data.neighborhoods, loading: false, error: null });
         // keep the selection if it still exists, otherwise clear it
-        if (s.neighborhood && !n.some((x) => x.id === s.neighborhood)) patch([{ op: "select_neighborhood", id: null }]);
+        if (s.neighborhood && !a.areas.some((x) => x.area.id === s.neighborhood)) patch([{ op: "select_neighborhood", id: null }]);
       } catch (e) {
         const err = e as HomingError;
-        if (err.code !== "aborted") setHoods((h) => ({ ...h, loading: false, error: err }));
+        if (err.code === "aborted" || !current()) return;
+        // a failed field explains a failed ranking better than the ranking's own error
+        const fieldOk = await fieldDone;
+        if (!current()) return;
+        setHoods((h) => ({ data: fieldOk ? h.data : null, loading: false, error: err }));
+        setAnalysis((x) => ({ data: fieldOk ? x.data : null, loading: false, error: err }));
       }
-    }, 350);
+    }, firstAnalysis.current ? 0 : 350);
+    // the first analysis after opening the page starts at once; later edits are debounced
+    firstAnalysis.current = false;
     return () => {
       clearTimeout(t);
       ac.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fk, hydrated, nonce]);
+  }, [ik, hydrated, nonce]);
 
-  // --- places of the selected neighborhood
+  // --- places of the selected area
   const selected = hoods.data?.find((n) => n.id === state.neighborhood) ?? null;
+  const selectedArea = analysis.data?.areas.find((a) => a.area.id === state.neighborhood) ?? null;
+  const [venues, setVenues] = useState<Load<VenueEvidence[]>>(idle);
   useEffect(() => {
     setActivePlace(null);
     if (!selected) {
       setPlaces(idle());
+      setVenues(idle());
       setPlan(idle());
       return;
     }
     const ac = new AbortController();
+    const rev = revRef.current;
     setPlaces((p) => ({ data: p.data, loading: true, error: null }));
+    setVenues((v) => ({ data: v.data, loading: true, error: null }));
     setPlan(idle());
-    api.places(stateRef.current, selected.id, undefined, ac.signal).then(
-      (data) => setPlaces({ data, loading: false, error: null }),
-      (e: HomingError) => e.code !== "aborted" && setPlaces({ data: null, loading: false, error: e }),
+    api2.places(stateRef.current, { stateRevision: rev, constraints: constraintsRef.current, areaId: selected.id }, ac.signal).then(
+      (r) => {
+        if (ac.signal.aborted || revRef.current !== rev) return;
+        const list = r.v === 2 ? r.data.venues : r.data.places.map(venueFromPlace);
+        setVenues({ data: list, loading: false, error: null });
+        setPlaces({ data: list.map((v) => v.place), loading: false, error: null });
+      },
+      (e: HomingError) => {
+        if (e.code === "aborted" || ac.signal.aborted) return;
+        setPlaces({ data: null, loading: false, error: e });
+        setVenues({ data: null, loading: false, error: e });
+      },
     );
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, fk, nonce, state.budget]);
+  }, [selected?.id, ik, nonce, state.budget]);
 
   const makePlan = useCallback(async (opts: { exclude?: string[]; include?: string[]; rules?: PlanRules } = {}) => {
     const s = stateRef.current;
@@ -313,6 +487,8 @@ function useStore() {
     setPlanRules(noRules());
     setOpenPlace(null);
     setCompare([]);
+    visitSeq.current++;
+    setVisit(noVisit());
   }, [state.city]);
 
   const notify = useCallback((text: string, undo?: () => void) => {
@@ -421,52 +597,106 @@ function useStore() {
     [makePlan],
   );
 
-  // --- compare cities with the same taste: one request per city, two at a time, each card shown when it lands
-  const setRun = useCallback((seq: number, city: string, run: Partial<CityRun>) => {
-    if (citiesRun.current?.seq !== seq) return;
-    setCities((c) => ({ ...c, runs: c.runs.map((r) => (r.city === city ? { ...r, ...run } : r)) }));
-  }, []);
-  const scoreOneCity = useCallback(
-    async (seq: number, city: string, signal: AbortSignal) => {
-      setRun(seq, city, { status: "loading", error: undefined });
+  // --- "Try this neighborhood": one short visit under the session constraints
+  const [visit, setVisit] = useState<VisitSlot>(noVisit);
+  const visitRef = useRef(visit);
+  visitRef.current = visit;
+  const visitSeq = useRef(0);
+  const requestVisit = useCallback(
+    async (areaIds: string[], opts: { includeIds?: string[]; excludeIds?: string[]; replacePlaceId?: string; from?: VisitSlot["from"]; startHour?: number } = {}) => {
+      const ids = [...new Set(areaIds)].slice(0, 3);
+      if (!ids.length) return;
+      const s = stateRef.current;
+      const cons = constraintsRef.current;
+      const rev = revRef.current;
+      const seq = ++visitSeq.current;
+      const excludeIds = [...new Set(opts.excludeIds ?? (visitRef.current.areaIds.join() === ids.join() ? visitRef.current.excludeIds : []))].slice(0, 100);
+      const prior = opts.replacePlaceId ? visitRef.current.data?.itinerary : undefined;
+      // the visit keeps the start hour it was built with when it is swapped or re-planned
+      const startHour = opts.startHour ?? visitRef.current.startHour ?? VISIT_START_HOUR;
+      setVisit((v) => ({ ...v, loading: true, error: null, areaIds: ids, excludeIds, from: opts.from ?? "planner", startHour }));
+      const rules = legacyRules(cons);
+      // "Try this neighborhood" is one relaxed day of three or four stops; the multi-day planner keeps its own days/pace
+      const visitState: ExploreState = { ...s, days: 1, pace: "relaxed" };
+      const legacyState = rules.budget !== null ? { ...visitState, budget: s.budget ? Math.min(s.budget, rules.budget) : rules.budget } : visitState;
       try {
-        const data = await api.city(stateRef.current, city, signal);
-        // the server can answer with a card that carries its own error (thin data, a timeout for that city)
-        if (data.error) setRun(seq, city, { status: "error", data: undefined, error: new HomingError("not_found", data.error, true) });
-        else setRun(seq, city, { status: "done", data, error: undefined });
+        const r = await api2.plan(
+          legacyState,
+          {
+            stateRevision: rev,
+            constraints: cons,
+            areaIds: ids,
+            includeIds: opts.includeIds ?? [],
+            excludeIds,
+            ...(prior ? { existingItinerary: prior, replacePlaceId: opts.replacePlaceId } : {}),
+            ...(startHour !== undefined ? { startHour } : {}),
+          },
+          { excludeCategories: rules.excludeCategories, excludeTags: rules.excludeTags },
+        );
+        if (seq !== visitSeq.current) return;
+        if (r.v === 2 && r.data.meta.stateRevision !== rev) return;
+        const data = r.v === 2 ? r.data : visitFromItinerary(r.data, cons);
+        setVisit({ data, loading: false, error: null, stale: false, areaIds: ids, from: opts.from ?? "planner", legacy: r.v === 1, revision: rev, excludeIds, startHour });
       } catch (e) {
-        const err = e as HomingError;
-        if (err.code !== "aborted") setRun(seq, city, { status: "error", error: err });
+        if (seq !== visitSeq.current) return;
+        setVisit((v) => ({ ...v, loading: false, error: e as HomingError }));
       }
     },
-    [setRun],
+    [],
   );
-  const compareCities = useCallback(
-    async (list: string[]) => {
-      const asked = [...new Set(list.map((c) => c.trim()).filter(Boolean))].slice(0, 5);
-      if (asked.length < 2) return;
-      citiesRun.current?.ac.abort();
-      const run = { ac: new AbortController(), seq: (citiesRun.current?.seq ?? 0) + 1 };
-      citiesRun.current = run;
-      setCities({ asked, runs: asked.map((city) => ({ city, status: "queued" })), running: true });
-      let next = 0;
-      const worker = async () => {
-        while (next < asked.length && !run.ac.signal.aborted) await scoreOneCity(run.seq, asked[next++], run.ac.signal);
-      };
-      await Promise.all(Array.from({ length: Math.min(CITY_CONCURRENCY, asked.length) }, worker));
-      if (citiesRun.current === run) setCities((c) => ({ ...c, running: false }));
+  /** Build a short visit of one area (or keep the current visit's areas when called again). */
+  const buildVisit = useCallback(
+    (areaId: string, opts: { includeIds?: string[]; excludeIds?: string[]; startHour?: number } = {}) =>
+      requestVisit([areaId], { ...opts, excludeIds: opts.excludeIds ?? [], from: "planner" }),
+    [requestVisit],
+  );
+  /** A visit the assistant built, opened as the current one with the constraints it was built under. */
+  const openVisit = useCallback(
+    (result: VisitResultV2, areaIds: string[]) => {
+      visitSeq.current++;
+      const cons = result.constraints;
+      // the plan's constraints become the session's, so Plan again and Swap keep them
+      agentCommit([], cons);
+      // swaps and re-plans keep the hour the assistant's walk starts at
+      const first = result.itinerary.days[0]?.stops[0]?.time;
+      const hour = first ? Number.parseInt(first, 10) : NaN;
+      const startHour = Number.isFinite(hour) && hour >= 6 && hour <= 22 ? hour : undefined;
+      setVisit({ data: result, loading: false, error: null, stale: false, areaIds, from: "assistant", legacy: false, revision: revRef.current, excludeIds: [], startHour });
     },
-    [scoreOneCity],
+    [agentCommit],
   );
-  /** Score one city of the current comparison again; the cards already there stay. */
-  const retryCity = useCallback(
-    async (city: string) => {
-      const run = citiesRun.current;
-      if (!run) return;
-      await scoreOneCity(run.seq, city, run.ac.signal);
+  const stopIds = (v: VisitResultV2 | null) => (v ? v.itinerary.days.flatMap((d) => d.stops.map((st) => st.place.id)) : []);
+  /** Replace one stop; every other stop id is kept. */
+  const swapVisitStop = useCallback(
+    async (placeId: string) => {
+      const v = visitRef.current;
+      if (!v.data) return;
+      const keep = stopIds(v.data).filter((id) => id !== placeId);
+      await requestVisit(v.areaIds, { includeIds: keep, excludeIds: [...v.excludeIds, placeId], replacePlaceId: placeId, from: v.from });
     },
-    [scoreOneCity],
+    [requestVisit],
   );
+  /** Remove one stop without asking for a replacement: it goes into the exclusion memory and the rest stay. */
+  const removeVisitStop = useCallback(
+    async (placeId: string) => {
+      const v = visitRef.current;
+      if (!v.data) return;
+      const keep = stopIds(v.data).filter((id) => id !== placeId);
+      await requestVisit(v.areaIds, { includeIds: keep, excludeIds: [...v.excludeIds, placeId], from: v.from });
+    },
+    [requestVisit],
+  );
+  // a visit made for older inputs is stale; when the constraints change and a visit is open, plan it again with them
+  const visitStale = !!visit.data && visit.revision !== revision;
+  const consKey = JSON.stringify(constraints);
+  const lastConsKey = useRef(consKey);
+  useEffect(() => {
+    if (lastConsKey.current === consKey) return;
+    lastConsKey.current = consKey;
+    const v = visitRef.current;
+    // the old stops are not forced back in: a new rule may exclude one of them
+    if (v.data && v.areaIds.length) void requestVisit(v.areaIds, { excludeIds: v.excludeIds, from: v.from });
+  }, [consKey, requestVisit]);
 
   // --- loves
   const addLove = useCallback(
@@ -534,32 +764,92 @@ function useStore() {
     }
   }, []);
 
-  // --- agent
-  const askAgent = useCallback(
-    async (message: string) => {
-      const text = message.trim().slice(0, 1000);
-      if (!text || agentBusy) return;
+  // --- agent (v2 turn protocol, with the v1 events still understood while the route moves over)
+  const sessionId = useRef<string>("");
+  const memoryRef = useRef<SessionMemory>(emptySessionMemory());
+  const runTurn = useCallback(
+    async (text: string, opts: { retryOf?: { turnId: string; goalId: string } } = {}) => {
+      if (!text || agentBusyRef.current) return;
+      if (!sessionId.current) sessionId.current = newId();
       const uid = Date.now();
-      const history = chat
+      const turnId = newId();
+      const history = chatRef.current
         .filter((t) => t.text)
         .slice(-8)
-        .map((t) => ({ role: t.role, content: t.text }));
+        .map((t) => ({ role: t.role, content: t.text.slice(0, 6000) }));
+      const startRev = revRef.current;
+      const startEpoch = inputEpoch.current;
       setChat((c) => [
         ...c,
-        { id: uid, role: "user", text, trace: [], cards: [] },
-        { id: uid + 1, role: "assistant", text: "", trace: [], cards: [], pending: true },
+        ...(opts.retryOf ? [] : [{ id: uid, role: "user" as const, text, trace: [], cards: [] }]),
+        { id: uid + 1, role: "assistant", text: "", trace: [], cards: [], pending: true, turnId, events: [], revision: startRev, ...(opts.retryOf ? { retryOf: opts.retryOf } : {}) },
       ]);
+      agentBusyRef.current = true;
       setAgentBusy(true);
       const ac = new AbortController();
       agentAbort.current = ac;
       const upd = (fn: (t: ChatTurn) => ChatTurn) => setChat((c) => c.map((t) => (t.id === uid + 1 ? fn(t) : t)));
-      await streamAgent(
-        { state: stateRef.current, message: text, history },
-        (e: AgentEvent) => {
+      /** the person changed the inputs after this turn started: its patches would overwrite newer choices */
+      const overtaken = () => inputEpoch.current !== startEpoch;
+      const memory: SessionMemory = { ...memoryRef.current, revision: startRev, constraints: constraintsRef.current.slice(0, 40) };
+      await streamAgentV2(
+        {
+          responseVersion: 2,
+          sessionId: sessionId.current,
+          turnId,
+          stateRevision: startRev,
+          state: stateRef.current,
+          memory,
+          message: text,
+          history: history.slice(-20),
+          ...(opts.retryOf ? { retryGoalId: opts.retryOf.goalId } : {}),
+        },
+        (e: AnyAgentEvent) => {
           if (ac.signal.aborted) return;
+          if (isV2Event(e)) {
+            if (e.turnId !== turnId) return; // another turn's event never lands here
+            if (e.type === "patch") {
+              if (overtaken() || e.baseRevision !== revRef.current) {
+                upd((t) => ({ ...t, conflict: true, events: [...(t.events ?? []), e] }));
+                return;
+              }
+              // ops and constraints land together with the server's revision, before any card of this turn
+              agentCommit(e.ops, e.constraints ?? null, e.nextRevision);
+              upd((t) => ({ ...t, revision: revRef.current, events: [...(t.events ?? []), e] }));
+              return;
+            }
+            if (e.type === "done") {
+              memoryRef.current = e.memory;
+              // the constraints already came with the patch events; done only records memory and never adds a revision
+              if (!overtaken()) agentCommit([], e.memory.constraints, undefined, { bump: false });
+              upd((t) => ({ ...t, pending: false, goals: e.goals, revision: revRef.current, events: [...(t.events ?? []), e] }));
+              return;
+            }
+            if (e.type === "plan") {
+              upd((t) => ({ ...t, goals: e.goals, events: [...(t.events ?? []), e] }));
+              return;
+            }
+            if (e.type === "answer") {
+              upd((t) => ({ ...t, text: e.claims.map((c) => c.text).join(" "), events: [...(t.events ?? []), e] }));
+              return;
+            }
+            if (e.type === "error") {
+              // an error tied to one goal leaves the rest of the turn running; a turn-level error ends it
+              upd((t) => ({ ...t, ...(e.goalId ? {} : { pending: false, error: e.message }), events: [...(t.events ?? []), e] }));
+              return;
+            }
+            upd((t) => ({ ...t, events: [...(t.events ?? []), e] }));
+            return;
+          }
+          // v1 events
           if (e.type === "trace") upd((t) => ({ ...t, trace: [...t.trace, { tool: e.tool, summary: e.summary }] }));
-          else if (e.type === "patch") patch(e.ops);
-          else if (e.type === "delta") upd((t) => ({ ...t, text: t.text + e.text }));
+          else if (e.type === "patch") {
+            if (overtaken()) upd((t) => ({ ...t, conflict: true }));
+            else {
+              agentCommit(e.ops, null);
+              upd((t) => ({ ...t, revision: revRef.current }));
+            }
+          } else if (e.type === "delta") upd((t) => ({ ...t, text: t.text + e.text }));
           // one card per kind per turn: a later ranking replaces the earlier one
           else if (e.type === "card") upd((t) => ({ ...t, cards: [...t.cards.filter((c) => c.kind !== e.card.kind), e.card] }));
           else if (e.type === "error") upd((t) => ({ ...t, pending: false, error: e.error.message }));
@@ -569,15 +859,50 @@ function useStore() {
       );
       upd((t) => ({ ...t, pending: false, stopped: ac.signal.aborted && !t.error ? true : t.stopped }));
       if (agentAbort.current === ac) agentAbort.current = null;
+      agentBusyRef.current = false;
       setAgentBusy(false);
     },
-    [agentBusy, chat, patch],
+    [agentCommit],
   );
+  const askAgent = useCallback((message: string) => runTurn(message.trim().slice(0, 1000)), [runTurn]);
+  /** Run one failed or partial goal of an earlier turn again; the other results of that turn stay. */
+  const retryGoal = useCallback(
+    async (turnId: string, goalId: string) => {
+      const list = chatRef.current;
+      const i = list.findIndex((t) => t.turnId === turnId);
+      if (i < 0) return;
+      // the question that started that turn (a retry turn points at the original)
+      const origin = list[i].retryOf ? list.findIndex((t) => t.turnId === list[i].retryOf?.turnId) : i;
+      const user = list.slice(0, origin < 0 ? i : origin).reverse().find((t) => t.role === "user");
+      if (!user) return;
+      await runTurn(user.text, { retryOf: { turnId, goalId } });
+    },
+    [runTurn],
+  );
+  /** Whether a turn's results were made for older inputs than the ones on screen now. */
+  const isTurnStale = useCallback((t: ChatTurn) => t.role === "assistant" && t.revision !== undefined && !t.pending && t.revision !== revision, [revision]);
   const stopAgent = useCallback(() => agentAbort.current?.abort(), []);
   const clearChat = useCallback(() => {
     agentAbort.current?.abort();
     setChat([]);
+    // a new conversation starts with fresh goals; the constraints stay, they are the person's
+    memoryRef.current = emptySessionMemory(revRef.current);
   }, []);
+
+  /** Drop a place from the session: never suggested again in this visit or by the assistant. */
+  const removePlace = useCallback(
+    (id: string) => {
+      const m = memoryRef.current;
+      memoryRef.current = { ...m, rejectedPlaceIds: [...new Set([...m.rejectedPlaceIds, id])].slice(-100) };
+      if (stopIds(visitRef.current.data).includes(id)) void removeVisitStop(id);
+      else setVisit((v) => (v.excludeIds.includes(id) ? v : { ...v, excludeIds: [...v.excludeIds, id].slice(-100) }));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [removeVisitStop],
+  );
+
+  // --- phone sheet: the tab bar opens the Map peeked or the shortlist; the Map screen reads it
+  const [mobileSheet, setMobileSheet] = useState<MobileSheet>("results");
   /** a line from Homing in the conversation that did not come from the agent, e.g. what a screenshot added */
   const addNote = useCallback((text: string) => {
     setChat((c) => [...c, { id: Date.now(), role: "assistant", text, trace: [], cards: [] }]);
@@ -600,6 +925,25 @@ function useStore() {
   );
 
   return {
+    // stage 09
+    revision,
+    analysis,
+    selectedArea,
+    venues,
+    constraints,
+    setConstraint,
+    removeConstraint,
+    visit: { ...visit, stale: visitStale },
+    buildVisit,
+    openVisit,
+    swapVisitStop,
+    removeVisitStop,
+    removePlace,
+    retryGoal,
+    isTurnStale,
+    mobileSheet,
+    setMobileSheet,
+    // stage 08 (kept while screens move over)
     beginNav,
     overlay,
     setOverlay,
@@ -625,9 +969,6 @@ function useStore() {
     addToPlan,
     compare,
     setCompare,
-    cities,
-    compareCities,
-    retryCity,
     showPlan,
     planFrom,
     planRules,

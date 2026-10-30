@@ -4,11 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { UserPlus, X } from "lucide-react";
 import type { ResolvedLove, TagRef } from "@/shared/contracts";
-import { LoveChip, LoveInput, PendingChip } from "./LoveChips";
+import { activeLoves } from "@/shared/contracts";
+import { cityName } from "@/components/ui/CityPicker";
+import { DOMAIN_NAME, LoveChip, LoveInput, PendingChip } from "./LoveChips";
 import { useExplore } from "./store";
 import { api } from "./api";
 import { Button } from "@/components/ui/primitives";
-import { AskBar } from "./AskBar";
 import { TripControls } from "./TripControls";
 import { RecentMaps } from "./RecentMaps";
 import { domainOf, namesText, nameOf, type LandingName } from "@/components/landing/scenes";
@@ -94,7 +95,46 @@ function Fingerprint() {
   );
 }
 
-export function TastePanel({ compact = false }: { compact?: boolean }) {
+/** A typed name that matched more than one thing: two or three plain choices with their kind, instead of a silent guess. */
+function WhichOne({ who }: { who: "you" | "them" }) {
+  const ex = useExplore();
+  const loves = who === "you" ? ex.state.loves : ex.state.companion?.loves ?? [];
+  const open = loves.filter((l) => !l.chosen && l.candidates.length >= 2);
+  if (!open.length) return null;
+  return (
+    <div className="mt-2 space-y-2">
+      {open.map((l) => (
+        <div key={l.query} className="rounded-[14px] bg-paper-sunk/70 p-2.5" data-testid="which-one">
+          <p className="mb-1.5 px-1 text-[13px] text-ink-2">
+            Which <strong className="font-[600] text-ink">{l.query}</strong> do you mean?
+          </p>
+          <div className="grid gap-1.5">
+            {l.candidates.slice(0, 3).map((c) => (
+              <button
+                key={c.id + c.domain}
+                onClick={() => ex.updateLove(who, l.query, (x) => ({ ...x, chosen: c }))}
+                className="flex min-h-11 items-center gap-2.5 rounded-[11px] bg-paper-raised px-2 py-1.5 text-left ring-1 ring-line transition-[transform,box-shadow] hover:-translate-y-px hover:shadow-[var(--shadow-rest)]"
+              >
+                {c.image ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={c.image} alt="" className="h-8 w-8 shrink-0 rounded-[8px] object-cover" />
+                ) : (
+                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] bg-paper-sunk text-[13px] font-[650] text-ink-2">{c.name.slice(0, 1)}</span>
+                )}
+                <span className="min-w-0">
+                  <span className="block truncate text-[14px] font-[580] text-ink">{c.name}</span>
+                  <span className="block truncate text-[12px] text-ink-3">{[DOMAIN_NAME[c.domain], c.subtitle].filter(Boolean).join(", ")}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function TastePanel({ compact = false, onDone, footer }: { compact?: boolean; onDone?: () => void; footer?: React.ReactNode }) {
   const ex = useExplore();
   const [reading, setReading] = useState<"you" | "them" | null>(null);
   const [readErr, setReadErr] = useState<string | null>(null);
@@ -138,12 +178,17 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
   }, [ex.state.loves, pendingKey]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col" data-taste-editor>
       <div ref={scroller} className="hm-scroll min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 pb-6 pt-5">
         <section>
           <h2 className="mb-1 text-[22px] font-[650] leading-tight tracking-[-0.02em]">What you love</h2>
-          {!compact && <p className="mb-3 text-[14px] leading-snug text-ink-2">Artists, films, shows, books, brands or places. Mix them, that&apos;s the point.</p>}
+          {!compact && (
+            <p className="mb-3 text-[14px] leading-snug text-ink-2">
+              Artists, films, shows, books, brands or places. Homing looks for the areas of {cityName(ex.state.city)} where they show up most.
+            </p>
+          )}
           <Chips who="you" />
+          <WhichOne who="you" />
           <div ref={inputBox} className={ex.state.loves.length ? "mt-2" : ""}>
             <LoveInput
               count={ex.state.loves.length}
@@ -207,6 +252,7 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
                   </button>
                 </div>
                 <Chips who="them" />
+                <WhichOne who="them" />
                 <div className={ex.state.companion?.loves.length ? "mt-2" : ""}>
                   <LoveInput
                     ink="them"
@@ -232,7 +278,19 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
           </AnimatePresence>
         </section>
       </div>
-      {ex.state.loves.length > 0 && <AskBar />}
+      {footer}
+      {onDone && (
+        <div className="border-t border-line bg-paper-raised/80 px-4 pb-4 pt-3">
+          <button
+            onClick={onDone}
+            data-testid="show-areas"
+            disabled={!activeLoves(ex.state.loves).length}
+            className="flex h-12 w-full items-center justify-center rounded-[14px] bg-you text-[16px] font-[600] text-white shadow-[var(--shadow-rest)] transition-[transform,background-color] hover:-translate-y-px hover:bg-you-deep active:scale-[0.98] disabled:opacity-45"
+          >
+            Show my areas
+          </button>
+        </div>
+      )}
     </div>
   );
 }

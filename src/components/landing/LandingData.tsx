@@ -2,71 +2,94 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import type { LandingData } from "./scenes";
+import type { LandingData, LandingScene } from "./scenes";
 
-type Ctx = { data: LandingData | null; settled: boolean; revealed: boolean; markReady: (key: string) => void };
-const LandingCtx = createContext<Ctx>({ data: null, settled: true, revealed: true, markReady: () => {} });
+type Ctx = {
+  /** hero scene first, the lower scenes merge in when they arrive */
+  data: LandingData | null;
+  /** the hero answer is in (or failed) */
+  settled: boolean;
+  /** the lower scenes are in (or failed) */
+  restSettled: boolean;
+  revealed: boolean;
+  /** the hero map has drawn its terrain; until then the hero shows a light preview of the same example */
+  heroReady: boolean;
+  markReady: (key: string) => void;
+};
+const LandingCtx = createContext<Ctx>({ data: null, settled: true, restSettled: true, revealed: true, heroReady: true, markReady: () => {} });
 export const useLanding = () => useContext(LandingCtx);
 
-/** Every live map the page shows before it opens. */
-const MAPS = ["hero", "reader", "owl", "pair"] as const;
-const STEPS: Record<string, string> = {
-  data: "Reading Qloo's taste graph",
-  hero: "Raising Lisbon",
-  reader: "Mapping a quiet reader in Berlin",
-  owl: "Mapping a night owl in Berlin",
-  pair: "Printing two inks over Lisbon",
+/**
+ * The loader holds the page only until the hero map and its example shortlist are on screen. Everything below the
+ * first screen loads behind it. The hold is capped at HOLD_MS counted from navigation start: past that the page
+ * opens on the example card and a light preview of the same map, and the live map fades in when it has drawn.
+ */
+const HOLD_MS = 2000;
+/** a short beat so the mark does not flash on a warm cache */
+const MIN_MS = 350;
+const reveal = (setRevealed: (v: boolean) => void, how: string) => {
+  performance.mark("landing:revealed");
+  performance.mark(`landing:revealed-${how}`);
+  setRevealed(true);
 };
-/** never hold the page longer than this: whatever is still loading finishes in place */
-const CAP_MS = 9000;
+
+type Part = { hero?: LandingScene | null; reader?: LandingScene | null; owl?: LandingScene | null; pair?: LandingScene | null };
+
+async function getPart(part: "hero" | "rest", signal: AbortSignal): Promise<Part | null> {
+  try {
+    const r = await fetch(`/api/landing?part=${part}`, { signal });
+    return r.ok ? ((await r.json()) as Part) : null;
+  } catch {
+    return null;
+  }
+}
 
 export function LandingProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<LandingData | null>(null);
   const [settled, setSettled] = useState(false);
-  const [done, setDone] = useState<Set<string>>(() => new Set());
+  const [restSettled, setRestSettled] = useState(false);
+  const [heroReady, setHeroReady] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const t0 = useRef(0);
 
   useEffect(() => {
     t0.current = performance.now();
     const ac = new AbortController();
-    fetch("/api/landing", { signal: ac.signal })
-      .then((r) => (r.ok ? (r.json() as Promise<LandingData>) : null))
-      .catch(() => null)
-      .then((d) => {
+    void getPart("hero", ac.signal).then((d) => {
+      if (ac.signal.aborted) return;
+      performance.mark("landing:data");
+      setData((cur) => ({ reader: null, owl: null, pair: null, cities: null, ...cur, hero: d?.hero ?? null }));
+      setSettled(true);
+      // the lower scenes are asked only now, so they never compete with the hero
+      void getPart("rest", ac.signal).then((r) => {
         if (ac.signal.aborted) return;
-        performance.mark("landing:data");
-        setData(d);
-        setSettled(true);
+        setData((cur) => ({ hero: cur?.hero ?? null, cities: null, reader: r?.reader ?? null, owl: r?.owl ?? null, pair: r?.pair ?? null }));
+        setRestSettled(true);
       });
-    const cap = window.setTimeout(() => setRevealed(true), CAP_MS);
+    });
+    // performance.now() counts from navigation start, so the cap holds however late hydration was
+    const hold = window.setTimeout(() => reveal(setRevealed, "cap"), Math.max(0, HOLD_MS - performance.now()));
     return () => {
       ac.abort();
-      window.clearTimeout(cap);
+      window.clearTimeout(hold);
     };
   }, []);
 
   const markReady = useCallback((key: string) => {
     performance.mark(`landing:${key}`);
-    setDone((s) => (s.has(key) ? s : new Set(s).add(key)));
+    if (key === "hero") setHeroReady(true);
   }, []);
 
-  // a scene the server could not prepare loads live after the page opens: do not wait for it
+  // without a prepared hero the map has nothing to wait for
+  const heroDone = heroReady || (settled && !data?.hero);
   useEffect(() => {
-    if (!settled) return;
-    for (const k of MAPS) if (!data?.[k]) markReady(k);
-  }, [settled, data, markReady]);
-
-  const all = settled && MAPS.every((k) => done.has(k));
-  useEffect(() => {
-    if (!all || revealed) return;
-    // a short beat after the last map so the loader doesn't blink on a warm cache
-    const wait = Math.max(0, 700 - (performance.now() - t0.current));
+    if (!heroDone || revealed) return;
+    const wait = Math.max(0, MIN_MS - (performance.now() - t0.current));
     const id = window.setTimeout(() => {
-      document.fonts.ready.then(() => setRevealed(true));
+      void document.fonts.ready.then(() => reveal(setRevealed, "ready"));
     }, wait);
     return () => window.clearTimeout(id);
-  }, [all, revealed]);
+  }, [heroDone, revealed]);
 
   useEffect(() => {
     document.documentElement.style.overflow = revealed ? "" : "hidden";
@@ -75,13 +98,13 @@ export function LandingProvider({ children }: { children: React.ReactNode }) {
     };
   }, [revealed]);
 
-  const progress = (Number(settled) + MAPS.filter((k) => done.has(k)).length) / (MAPS.length + 1);
-  const step = !settled ? "data" : MAPS.find((k) => !done.has(k)) ?? "pair";
+  const progress = settled ? (heroDone ? 1 : 0.6) : 0.25;
+  const label = !settled ? "Opening an example from Qloo's data" : "Drawing the example map of Lisbon";
 
   return (
-    <LandingCtx.Provider value={{ data, settled, revealed, markReady }}>
+    <LandingCtx.Provider value={{ data, settled, restSettled, revealed, heroReady: heroDone, markReady }}>
       {children}
-      <AnimatePresence>{!revealed && <Loader key="loader" progress={progress} label={STEPS[step]} />}</AnimatePresence>
+      <AnimatePresence>{!revealed && <Loader key="loader" progress={progress} label={label} />}</AnimatePresence>
     </LandingCtx.Provider>
   );
 }
@@ -92,23 +115,26 @@ const RINGS = [
   "M30.4 31.9c-.3-4.7 3.4-9.6 8.3-9.9 4.5-.2 7.2 3.1 6.8 7.2-.4 4.3-3.6 7-7.8 6.9-3.9-.1-7.1-1.2-7.3-4.2Z",
 ];
 
-/** The mark draws itself ring by ring while the maps load; the page opens like a curtain. */
+/** The mark draws itself ring by ring while the hero map loads; the page opens like a curtain. */
 function Loader({ progress, label }: { progress: number; label: string }) {
   return (
     <motion.div
       role="status"
       aria-live="polite"
       aria-label="Loading Homing"
+      data-testid="landing-loader"
       className="fixed inset-0 z-[100] grid place-items-center bg-paper"
       initial={false}
       exit={{ clipPath: "inset(0 0 100% 0)" }}
-      style={{ clipPath: "inset(0 0 0% 0)" }}
-      transition={{ duration: 0.75, ease: [0.7, 0, 0.2, 1] }}
+      // the server-rendered loader also leaves on its own at the cap, so a slow script can never keep the page covered
+      style={{ clipPath: "inset(0 0 0% 0)", animation: `hm-loader-out 0.35s ease-in ${HOLD_MS / 1000}s forwards` }}
+      transition={{ duration: 0.35, ease: [0.7, 0, 0.2, 1] }}
     >
-      <motion.div className="flex flex-col items-center" exit={{ y: -40, opacity: 0 }} transition={{ duration: 0.45, ease: [0.5, 0, 0.75, 0] }}>
+      <style>{"@keyframes hm-loader-out{to{opacity:0;visibility:hidden}}"}</style>
+      <motion.div className="flex flex-col items-center" exit={{ y: -24, opacity: 0 }} transition={{ duration: 0.22, ease: [0.5, 0, 0.75, 0] }}>
         <svg width="112" height="112" viewBox="0 0 64 64" fill="none" aria-hidden className="hm-loader-mark">
           {RINGS.map((d, i) => (
-            <path key={i} d={d} pathLength={1} stroke="var(--you)" strokeWidth={i === 0 ? 2.6 : 2.4} strokeLinecap="round" style={{ animationDelay: `${i * 0.18}s` }} />
+            <path key={i} d={d} pathLength={1} stroke="var(--you)" strokeWidth={i === 0 ? 2.6 : 2.4} strokeLinecap="round" style={{ animationDelay: `${i * 0.14}s` }} />
           ))}
           <circle cx="38.2" cy="29.1" r="3.6" fill="var(--ink)" className="hm-loader-dot" />
         </svg>
@@ -122,7 +148,7 @@ function Loader({ progress, label }: { progress: number; label: string }) {
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.22 }}
+            transition={{ duration: 0.2 }}
             className="mt-4 text-[14.5px] text-ink-3"
           >
             {label}
