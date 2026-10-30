@@ -4,6 +4,8 @@ import { buildFingerprint, matchedPlaceTags, tagName, usefulExplanation } from "
 import { coordinates, neighborhoodName, rankNeighborhoods } from "./neighborhoods";
 import { haversine } from "./geo";
 import { signals } from "./signals";
+import { tagRef, searchPlaceTags } from "@/server/qloo/search";
+import { cityCenter } from "./city";
 
 // Review keywords that say nothing about the place itself ("price", "pay", "tourist", "the view")
 const NOISE = /^(?:price|prices|pay|paid|payment|tourist|tourists|meal|meals|tables?|vision|the view|view|place|spot|location|staff|service|people|time|money|value|cash|card|line|queue|wait|walk|building|living room|room|stuff|thing|things|area|street|food|drinks?|menu|portion|portions|bill|tip)$/i;
@@ -11,7 +13,7 @@ const NOISE = /^(?:price|prices|pay|paid|payment|tourist|tourists|meal|meals|tab
 export const CATEGORY_TAGS: Record<Category, string[]> = {
   coffee: ["urn:tag:genre:place:restaurant:coffee_shop", "urn:tag:category:place:cafe", "urn:tag:genre:place:restaurant:bakery"],
   food: ["urn:tag:category:place:restaurant"],
-  drinks: ["urn:tag:genre:place:restaurant:bar"],
+  drinks: ["urn:tag:genre:place:restaurant:bar", "urn:tag:genre:place:night_club", "urn:tag:genre:place:nightclub"],
   culture: ["urn:tag:genre:place:book_store", "urn:tag:genre:place:museum", "urn:tag:genre:place:art_gallery", "urn:tag:genre:place:live_music_venue"],
   stay: ["urn:tag:genre:place:hotel"],
 };
@@ -41,6 +43,19 @@ export function openingHours(value: unknown): Place["hours"] {
   return Object.keys(hours).length ? hours : undefined;
 }
 
+/** Keep classifiers for exclusions even when tagRef cannot produce a named display tag. */
+export function placeClassifications(row: QlooRecord): string[] {
+  const properties = record(row.properties);
+  const values = [row.types, properties.types, properties.type, properties.place_type,
+    properties.primary_genre, ...records(row.tags)];
+  return [...new Set(values.flatMap(value => {
+    if (typeof value === "string") return [value];
+    if (Array.isArray(value)) return value.flatMap(item => typeof item === "string" ? [item] : [string(record(item).id), string(record(item).name)].filter((s): s is string => !!s));
+    const item = record(value);
+    return [string(item.id), string(item.tag_id), string(item.name)].filter((s): s is string => !!s);
+  }))];
+}
+
 export function placeFromRow(row: QlooRecord, category: Category, tags: TagRef[]): Place | null {
   const id = string(row.entity_id);
   const name = string(row.name);
@@ -65,7 +80,8 @@ export function placeFromRow(row: QlooRecord, category: Category, tags: TagRef[]
     keywords, website: safeWebsite(properties.website),
     description: string(properties.short_description) ?? (string(properties.description) ?? string(row.description))?.slice(0, 160),
     mapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([name, address].filter(Boolean).join(", "))}`,
-    neighborhood: neighborhoodName(row) };
+    neighborhood: neighborhoodName(row), tags: records(row.tags).map(tagRef).filter((tag): tag is TagRef => !!tag),
+    classifications: placeClassifications(row) };
 }
 
 /** "SALA DE ARTE PÚBLICO SIQUEIROS" reads as "Sala De Arte Público Siqueiros"; mixed case is left alone. */
@@ -158,4 +174,34 @@ export async function findPlaces(state: ExploreState, neighborhoodId: string, ca
   const neighborhood = neighborhoods.find((item) => item.id === neighborhoodId);
   if (!neighborhood) throw apiError("not_found", "Neighborhood not found in this taste map.");
   return placesNear(state, neighborhood, categories, [...fingerprint.you, ...(fingerprint.them ?? [])]);
+}
+
+export function matchesPlaceIntent(row: QlooRecord, intent: "dance" | "concert" | "bar"): boolean {
+  const tags = [...records(row.tags), record(record(row.properties).primary_genre)];
+  const text = tags.map(tag => `${tag.id ?? tag.tag_id ?? ""} ${tag.name ?? ""}`).join(" ").replace(/_/g, " ");
+  if (/\bhotel\b|\blodging\b/i.test(text)) return false;
+  return (intent === "dance" ? /night\s?club|dance\s?club|discothe|dancing|techno|electronic/i
+    : intent === "concert" ? /live music|concert|music venue|jazz club/i : /\bbar\b|\bpub\b|brewery/i).test(text);
+}
+
+/** City-wide intent search with actual loves plus Qloo genre/ambience signals, then strict venue verification. */
+export async function searchTastePlaces(state: ExploreState, intent: "dance" | "concert" | "bar", area?: Pick<Neighborhood, "center">): Promise<Place[]> {
+  const queries = intent === "dance" ? ["night club", "dance"] : intent === "concert" ? ["live music", "concert"] : ["bar", "pub"];
+  const [center, fingerprint, tagLists, music] = await Promise.all([
+    area?.center ?? cityCenter(state.city), buildFingerprint(state), Promise.all(queries.map(q => searchPlaceTags(q))),
+    qlooGet("/v2/insights", { "filter.type": "urn:tag", "filter.tag.types": "urn:tag:genre:music", ...signals([...state.loves, ...(state.companion?.loves ?? [])]), take: 5 })
+      .then(result => resultRows(result, "tags").map(tagRef).filter((tag): tag is TagRef => !!tag)).catch(() => [] as TagRef[]),
+  ]);
+  const filters = [...new Map(tagLists.flat().filter(tag => matchesPlaceIntent({ tags: [tag] }, intent)).map(tag => [tag.id, tag])).values()].slice(0, 4);
+  if (!filters.length) return [];
+  const radius = area ? 1800 : 15000;
+  const response = await Promise.all(filters.map(tag => qlooGet("/v2/insights", {
+    "filter.type": "urn:entity:place", "filter.location": `POINT(${center[0]} ${center[1]})`, "filter.location.radius": radius,
+    "filter.tags": tag.id, ...signals([...state.loves, ...(state.companion?.loves ?? [])], [...state.refinements, ...music.slice(0, 3), ...fingerprint.you.filter(t => t.kind === "ambience").slice(0, 2)]), take: 30,
+  })));
+  const rows = [...new Map(response.flatMap(r => resultRows(r, "entities")).map(row => [string(row.entity_id), row])).values()];
+  return rows.filter(row => matchesPlaceIntent(row, intent)).flatMap(row => {
+    const place = placeFromRow(row, intent === "concert" ? "culture" : "drinks", [...fingerprint.you, ...music]);
+    return place && withinBudget(place, state.budget) && haversine(center, [place.lon, place.lat]) <= radius ? [place] : [];
+  }).sort(comparePlaces).slice(0, 10);
 }

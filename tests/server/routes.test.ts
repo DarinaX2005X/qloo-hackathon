@@ -8,13 +8,31 @@ import { POST as neighborhoods } from "@/app/api/neighborhoods/route";
 import { POST as places } from "@/app/api/places/route";
 import { POST as plan } from "@/app/api/plan/route";
 import { POST as fingerprint } from "@/app/api/fingerprint/route";
+import { POST as cities } from "@/app/api/cities/route";
+import { compareCities } from "@/server/engine/cities";
+import { clearRateLimits } from "@/server/engine/rate-limit";
 import { errorResponse } from "@/server/engine/http";
 import { state } from "./helpers";
 
 vi.mock("@/server/qloo/client", async (original) => ({ ...await original<typeof import("@/server/qloo/client")>(), qlooGet: vi.fn() }));
-beforeEach(() => { vi.mocked(qlooGet).mockReset(); });
+vi.mock("@/server/engine/cities", () => ({ compareCities: vi.fn() }));
+beforeEach(() => { vi.mocked(qlooGet).mockReset(); vi.mocked(compareCities).mockReset(); clearRateLimits(); });
 
 describe("API error contract", () => {
+  it.each([1, 5])("accepts %s cities, including a single progressive request", async count => {
+    const requested = ["Lisbon", "Berlin", "Tokyo", "Paris", "Rome"].slice(0, count);
+    vi.mocked(compareCities).mockResolvedValue([]);
+    const response = await cities(new Request("https://example.test/api/cities", { method: "POST", body: JSON.stringify({ state: state(), cities: requested }) }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ cities: [] });
+    expect(compareCities).toHaveBeenCalledWith(state(), requested);
+  });
+  it.each([{ requested: [] }, { requested: ["Lisbon", "Berlin", "Tokyo", "Paris", "Rome", "Oslo"] }])("rejects an invalid city count without calling the engine: $requested", async ({ requested }) => {
+    const response = await cities(new Request("https://example.test/api/cities", { method: "POST", body: JSON.stringify({ state: state(), cities: requested }) }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "bad_input" } });
+    expect(compareCities).not.toHaveBeenCalled();
+  });
   it.each([field, neighborhoods, places, plan, fingerprint])("rejects malformed JSON and invalid payloads with ApiError", async (handler) => {
     for (const body of ["{", "{}", JSON.stringify({ ...state(), discovery: 2 })]) {
       const response = await handler(new Request("https://example.test/api", { method: "POST", body }));

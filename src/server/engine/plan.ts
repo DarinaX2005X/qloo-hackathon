@@ -1,8 +1,11 @@
 ﻿import { type Category, type ExploreState, type Itinerary, type Place, apiError } from "@/shared/contracts";
 import { walkMinutes } from "./geo";
+import { haversine, coordinates } from "./geo";
+import type { Neighborhood } from "@/shared/contracts";
 import { rankNeighborhoods } from "./neighborhoods";
 import { getCityEvidence } from "./evidence";
-import { placesNear, WEEKDAYS, withinBudget } from "./places";
+import { placesNear, WEEKDAYS, withinBudget, placeFromRow, bestCategory } from "./places";
+import { qlooGet, resultRows, string } from "@/server/qloo/client";
 
 export type PlanSlot = { time: string; slot: string; categories: Category[] };
 export const PLAN_SLOTS: PlanSlot[] = [
@@ -13,7 +16,10 @@ export const PLAN_SLOTS: PlanSlot[] = [
   { time: "19:30", slot: "Dinner", categories: ["food"] },
   { time: "21:30", slot: "Evening drinks", categories: ["drinks"] },
 ];
-export type PlanOptions = Partial<Pick<ExploreState, "pace" | "startHour" | "budget">> & { exclude?: string[]; include?: string[] };
+export type PlanOptions = Partial<Pick<ExploreState, "pace" | "startHour" | "budget">> & {
+  exclude?: string[]; include?: string[]; excludeCategories?: Category[]; excludeTags?: string[];
+  relaxCategories?: boolean;
+};
 export type PlanArea = { id: string; name: string; places: Place[] };
 export type ScheduledSlot = PlanSlot & { day: number; date: Date; area: PlanArea; place?: Place };
 
@@ -87,10 +93,74 @@ export function isOpen(place: Place, date: Date, time: string): boolean | undefi
 
 export function slotCandidates(slot: ScheduledSlot, used: Set<string>, options: PlanOptions, previous?: Place): Place[] {
   return slot.area.places.filter((place) => slot.categories.includes(place.category) && !used.has(place.id) &&
-    !options.exclude?.includes(place.id) && withinBudget(place, options.budget) && isOpen(place, slot.date, slot.time) !== false)
+    !excludedPlace(place, options) && withinBudget(place, options.budget) && suitableAt(place, slot.date, slot.time))
     .map((place) => ({ place, walk: previous ? walkMinutes([previous.lon, previous.lat], [place.lon, place.lat]) : 0 }))
     .sort((a, b) => (a.place.affinity === b.place.affinity ? Number(a.place.priceLevel === undefined) - Number(b.place.priceLevel === undefined) : 0) ||
       (b.place.affinity - 0.04 * b.walk) - (a.place.affinity - 0.04 * a.walk) || a.place.id.localeCompare(b.place.id)).map((item) => item.place);
+}
+
+/** Unknown hours at an event venue are not evidence of a daytime cultural visit. */
+export function suitableAt(place: Place, date: Date, time: string): boolean {
+  const open = isOpen(place, date, time);
+  if (open === false) return false;
+  if (open === undefined && minutes(time) < 18 * 60 && place.tags?.some(tag => /concert.hall|live.music.venue|night.?club/i.test(`${tag.id} ${tag.name}`))) return false;
+  return true;
+}
+
+function classificationText(value: string): string {
+  return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[_:/-]/g, " ");
+}
+
+/** "No museums" excludes museum/gallery classifications, not the whole culture category. */
+export function isMuseumPlace(place: Place): boolean {
+  const classifiers = [...(place.classifications ?? []), ...(place.tags ?? []).flatMap(tag => [tag.id, tag.name])];
+  if (classifiers.some(value => /museum|museu|museo|musee|\bgaller(?:y|ies)\b/.test(classificationText(value)))) return true;
+  // Last resort for incomplete provider taxonomy, including German compound museum names.
+  return /museum|museu|museo|musee/.test(classificationText(place.name));
+}
+
+export function excludedPlace(place: Place, options: PlanOptions): boolean {
+  if (options.exclude?.includes(place.id) || options.excludeCategories?.includes(place.category)) return true;
+  if (options.excludeTags?.some(tag => /museum|museu|museo|musee/.test(classificationText(tag))) && isMuseumPlace(place)) return true;
+  const normalize = (value: string) => classificationText(value).replace(/s\b/g, "").trim();
+  const tags = [...(place.classifications ?? []), ...(place.tags ?? []).flatMap(tag => [tag.id, tag.name])].map(normalize);
+  return (options.excludeTags ?? []).some(tag => tags.some(value => value === normalize(tag) || value.split(" ").includes(normalize(tag))));
+}
+
+export function missingReason(slot: ScheduledSlot, used: Set<string>, options: PlanOptions): "none_nearby" | "closed" | "over_budget" | "unsuitable_time" {
+  const pool = slot.area.places.filter(p => slot.categories.includes(p.category) && !used.has(p.id) && !excludedPlace(p, options));
+  if (!pool.length) return "none_nearby";
+  const affordable = pool.filter(p => withinBudget(p, options.budget));
+  return !affordable.length ? "over_budget" : affordable.every(p => isOpen(p, slot.date, slot.time) === false) ? "closed" : "unsuitable_time";
+}
+
+function words(items: string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** Explain the observed failure, never infer closure from an empty candidate list. */
+export function planDayNote(day: Itinerary["days"][number], recovery?: string): string | undefined {
+  const missing = day.missing.filter(slot => !slot.startsWith("Couldn't fit "));
+  const includes = day.missing.filter(slot => slot.startsWith("Couldn't fit "));
+  const count = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"][missing.length] ?? String(missing.length);
+  const description = `${count} ${missing.every(slot => /dinner|evening/i.test(slot)) ? "evening" : "planned"} ${missing.length === 1 ? "slot" : "slots"}`;
+  const sentences: string[] = [];
+  if (recovery) sentences.push(recovery);
+  else if (!day.stops.length) sentences.push(`Homing couldn't find places that fit you near ${day.neighborhood} for this day.`);
+  else if (missing.length) sentences.push(`Homing couldn't find places that fit you for ${description} near ${day.neighborhood}.`);
+  else if (day.stops.some(stop => stop.reasonCodes?.includes("relaxed_category"))) sentences.push("Homing used a different kind of place for some stops to fill the day.");
+  if (recovery && missing.length && day.stops.length) sentences.push(`It left ${description} open.`);
+  for (const reason of ["closed", "over_budget", "unsuitable_time"] as const) {
+    const slots = [...new Set((day.issues ?? []).filter(issue => issue.reason === reason).map(issue => issue.slot.toLowerCase()))];
+    if (!slots.length) continue;
+    const when = words(slots);
+    sentences.push(reason === "closed" ? `The matching places for ${when} are closed at the planned times.`
+      : reason === "over_budget" ? `The matching places for ${when} are above your budget.`
+        : `The available times didn't work for ${when}.`);
+  }
+  sentences.push(...includes.map(note => `${note.replace(/\.$/, "")}.`));
+  if (!day.stops.length) sentences.push("Try another area or a different start time.");
+  return sentences.length ? sentences.join(" ") : undefined;
 }
 
 export function planFromPlaces(days: 1 | 2 | 3, areas: PlanArea[], now: Date = new Date(), options: PlanOptions = {}): Itinerary {
@@ -106,13 +176,16 @@ export function planFromPlaces(days: 1 | 2 | 3, areas: PlanArea[], now: Date = n
     const place = areas.flatMap((area) => area.places).find((item) => item.id === id);
     let reason: string | undefined;
     if (!place) reason = "not available in the selected neighborhoods";
+    else if (excludedPlace(place, { ...options, exclude: [] })) reason = "excluded from this plan";
     else if (!withinBudget(place, options.budget)) reason = "above your budget";
     else {
       const compatible = slots.filter((slot) => slot.categories.includes(place.category) && slot.area.places.some((item) => item.id === id));
-      const open = compatible.filter((slot) => isOpen(place, slot.date, slot.time) !== false);
+      const open = compatible.filter((slot) => suitableAt(place, slot.date, slot.time));
       const target = open.find((slot) => !slot.place);
       if (target) { target.place = place; used.add(id); }
-      else reason = compatible.length && !open.length ? "closed at the available times" : `no available ${place.category} slot`;
+      else reason = compatible.length && !open.length
+        ? compatible.every(slot => isOpen(place, slot.date, slot.time) === false) ? "closed at the available times" : "not suitable at the available times"
+        : `no available ${place.category} slot`;
     }
     if (options.exclude?.includes(id)) reason = "excluded from this plan";
     if (reason) missingIncludes.push(`Couldn't fit ${place?.name ?? id}: ${reason}`);
@@ -144,24 +217,52 @@ export function planFromPlaces(days: 1 | 2 | 3, areas: PlanArea[], now: Date = n
   return { days: Array.from({ length: days }, (_, day) => {
     const today = slots.filter((slot) => slot.day === day);
     const date = today[0].date;
-    const result: Itinerary["days"][number] = { date: date.toISOString().slice(0, 10), weekday: WEEKDAYS[date.getUTCDay()], neighborhood: today[0].area.name, stops: [], missing: [] };
+    const result: Itinerary["days"][number] = { date: date.toISOString().slice(0, 10), weekday: WEEKDAYS[date.getUTCDay()], neighborhood: today[0].area.name, stops: [], missing: [], issues: [] };
     let previous: Place | undefined;
+    let travel = 0;
     for (const slot of today) {
-      if (!slot.place) { result.missing.push(slot.slot); continue; }
+      const reasonCodes: string[] = [];
+      if (!slot.place && options.relaxCategories) {
+        const reason = missingReason(slot, reserved, options);
+        slot.place = slotCandidates({ ...slot, categories: ["coffee", "culture", "food", "drinks"] }, reserved, options, previous)[0];
+        if (slot.place) { reserved.add(slot.place.id); reasonCodes.push(reason, "relaxed_category"); }
+      }
+      if (!slot.place) {
+        result.missing.push(slot.slot); result.issues!.push({ slot: slot.slot, reason: missingReason(slot, reserved, options) }); continue;
+      }
+      let walk = previous ? Math.round(walkMinutes([previous.lon, previous.lat], [slot.place.lon, slot.place.lat])) : 0;
+      let arrival = minutes(slot.time) + travel + walk;
+      // Check the actual arrival after walking, not the nominal slot time.
+      if (arrival >= 24 * 60 || isOpen(slot.place, date, timeLabel(arrival)) === false) {
+        const timingReason = arrival >= 24 * 60 ? "unsuitable_time" : "closed";
+        reserved.delete(slot.place.id);
+        const replacement = slotCandidates({ ...slot, time: timeLabel(minutes(slot.time) + travel) }, reserved, options, previous)
+          .find(p => {
+            const at = minutes(slot.time) + travel + (previous ? Math.round(walkMinutes([previous.lon, previous.lat], [p.lon, p.lat])) : 0);
+            return at < 24 * 60 && isOpen(p, date, timeLabel(at)) !== false;
+          });
+        if (!replacement) { result.missing.push(slot.slot); result.issues!.push({ slot: slot.slot, reason: timingReason }); continue; }
+        slot.place = replacement; reserved.add(replacement.id); reasonCodes.push(timingReason);
+        walk = previous ? Math.round(walkMinutes([previous.lon, previous.lat], [replacement.lon, replacement.lat])) : 0;
+        arrival = minutes(slot.time) + travel + walk;
+      }
       const place = slot.place;
-      result.stops.push({ time: slot.time, slot: slot.slot, place,
-        walkMin: previous ? Math.round(walkMinutes([previous.lon, previous.lat], [place.lon, place.lat])) : 0,
-        hoursNote: isOpen(place, date, slot.time) === true ? "open" : "hours not listed" });
+      travel += walk;
+      result.stops.push({ time: timeLabel(arrival), slot: reasonCodes.includes("relaxed_category") ? "Alternative stop" : slot.slot, place,
+        walkMin: walk, walkIsApproximate: true, reasonCodes,
+        hoursNote: isOpen(place, date, timeLabel(arrival)) === true ? "open" : "hours not listed" });
       previous = place;
     }
     if (day === days - 1) result.missing.push(...missingIncludes);
+    result.note = planDayNote(result);
     return result;
   }) };
 }
 
-export async function solvePlan(state: ExploreState, neighborhoodIds: string[], options: Pick<PlanOptions, "exclude" | "include"> = {}): Promise<Itinerary> {
+export async function solvePlan(state: ExploreState, neighborhoodIds: string[], options: Pick<PlanOptions, "exclude" | "include" | "excludeCategories" | "excludeTags"> = {}, preferredNeighborhoods: Neighborhood[] = []): Promise<Itinerary> {
   if (!neighborhoodIds.length || neighborhoodIds.length > 3) throw apiError("bad_input", "Select one to three neighborhoods.");
-  const [neighborhoods, evidence] = await Promise.all([rankNeighborhoods(state), getCityEvidence(state)]);
+  const [ranking, evidence] = await Promise.all([rankNeighborhoods(state), getCityEvidence(state)]);
+  const neighborhoods = [...new Map([...preferredNeighborhoods, ...ranking].map(n => [n.id, n])).values()];
   const selected = neighborhoodIds.map((id) => {
     const neighborhood = neighborhoods.find((item) => item.id === id);
     if (!neighborhood) throw apiError("not_found", "Neighborhood not found in this taste map.");
@@ -172,5 +273,50 @@ export async function solvePlan(state: ExploreState, neighborhoodIds: string[], 
     places: await placesNear({ ...state, budget: null }, neighborhood, ["coffee", "culture", "food", "drinks", ...(options.include?.length ? ["stay" as const] : [])],
       [...evidence.fingerprint.you, ...(evidence.fingerprint.them ?? [])]),
   })));
-  return planFromPlaces(state.days, areas, new Date(), { ...options, budget: state.budget, pace: state.pace, startHour: state.startHour });
+  // A must-include need not be in a top-ten category sample. Fetch its actual Qloo row,
+  // verify both ID and city distance, and add it to the nearest selected area's candidate pool.
+  const absent = (options.include ?? []).filter(id => !areas.some(area => area.places.some(p => p.id === id)));
+  if (absent.length) {
+    const response = await qlooGet("/v2/insights", { "filter.type": "urn:entity:place", "filter.entities": absent.join(","), take: 12 });
+    for (const row of resultRows(response, "entities")) {
+      if (!absent.includes(string(row.entity_id) ?? "")) continue;
+      const point = coordinates(row);
+      const category = bestCategory(row);
+      if (!point || !category) continue;
+      const nearest = selected.map((n, i) => ({ i, distance: haversine(n.center, point) })).sort((a, b) => a.distance - b.distance)[0];
+      const place = placeFromRow(row, category, [...evidence.fingerprint.you, ...(evidence.fingerprint.them ?? [])]);
+      if (place && nearest.distance <= 15000 && areas[nearest.i]) areas[nearest.i].places.push(place);
+    }
+  }
+  const now = new Date();
+  const settings = { ...options, budget: state.budget, pace: state.pace, startHour: state.startHour };
+  const result = planFromPlaces(state.days, areas, now, settings);
+  for (let day = 0; day < result.days.length; day++) {
+    if (!result.days[day].missing.length) continue;
+    const original = result.days[day];
+    const initial = selected[Math.min(day, selected.length - 1)];
+    const used = result.days.flatMap((d, i) => i === day ? [] : d.stops.map(s => s.place.id));
+    const date = new Date(now); date.setUTCDate(date.getUTCDate() + day);
+    const candidates = [
+      ...neighborhoods.filter(n => !selected.some(s => s.id === n.id)).slice(0, 3).map(n => ({ n, radius: 900, relax: false, note: `Homing couldn't fill this day with places that fit you near ${initial.name}, so it used ${n.name} instead.`, code: "relaxed_neighborhood" })),
+      { n: initial, radius: 2200, relax: false, note: `Homing looked farther around ${initial.name} to find more places that fit you.`, code: "relaxed_radius" },
+      { n: initial, radius: 2200, relax: true, note: `Homing looked farther around ${initial.name} and allowed a looser match to your place preferences.`, code: "relaxed_preferences" },
+    ];
+    for (const attempt of candidates) {
+      const places = await placesNear({ ...state, budget: null, ...(attempt.relax ? { refinements: [] } : {}) }, attempt.n,
+        ["coffee", "culture", "food", "drinks"], [...evidence.fingerprint.you, ...(evidence.fingerprint.them ?? [])], { radius: attempt.radius, take: 20, perCategory: 20 });
+      const candidate = planFromPlaces(1, [{ id: attempt.n.id, name: attempt.n.name, places }], date,
+        { ...settings, include: options.include?.filter(id => !used.includes(id)), exclude: [...(options.exclude ?? []), ...used], relaxCategories: attempt.relax }).days[0];
+      const required = (d: Itinerary["days"][number]) => d.stops.filter(s => options.include?.includes(s.place.id)).length;
+      if (candidate.stops.length > result.days[day].stops.length && required(candidate) >= required(result.days[day])) {
+        candidate.note = planDayNote(candidate, attempt.note);
+        candidate.stops.forEach(stop => { stop.reasonCodes = [...new Set([...(stop.reasonCodes ?? []), ...original.issues?.map(i => i.reason) ?? [], attempt.code])]; });
+        result.days[day] = candidate;
+      }
+      if (!result.days[day].missing.length) break;
+    }
+    if (!result.days[day].stops.length) result.days[day].note = planDayNote(result.days[day],
+      `Homing couldn't find places that fit you near ${initial.name} for this day, even after looking farther away and allowing a looser match to your place preferences.`);
+  }
+  return result;
 }

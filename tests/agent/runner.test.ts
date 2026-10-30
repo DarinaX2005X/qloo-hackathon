@@ -43,13 +43,12 @@ describe("fast agent", () => {
     expect(events[0]).toEqual({ type: "trace", tool: "agent", summary: "Checking your preferences" });
     const result = await pending;
     expect(result).toMatchObject({ discovery: 0.8, days: 2 });
-    expect(progress(events).map((e) => e.type)).toEqual(["trace", "patch", "trace", "card", "delta", "delta", "done"]);
+    expect(progress(events).map((e) => e.type)).toEqual(["trace", "patch", "trace", "card", "delta", "done"]);
     expect(events.find((e) => e.type === "card")).toMatchObject({ card: { kind: "ranking", neighborhoods: [neighborhood] } });
     expect(rankNeighborhoods).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ discovery: 0.8, days: 2 }));
-    expect(model).toHaveBeenCalledTimes(2);
-    const final = model.mock.calls[1][0];
-    expect(final).toMatchObject({ stream: true, max_tokens: 120 }); expect(final.tools).toBeUndefined();
-    expect(JSON.parse(String(final.messages[1].content)).facts.topNeighborhoods).toEqual(["Kreuzberg"]);
+    expect(model).toHaveBeenCalledTimes(1);
+    expect(finalText(events)).toContain('quieter places');
+    expect(finalText(events)).toContain('Kreuzberg');
   });
 
   it("starts independent searches in parallel before any one resolves", async () => {
@@ -75,27 +74,23 @@ describe("fast agent", () => {
     const events: AgentEvent[] = [];
     const result = await runAgent(request("add my partner: techno and Succession"), (e) => events.push(e));
     expect(result.companion?.loves).toHaveLength(3); expect(result.companion?.loves.every((love) => love.chosen)).toBe(true);
-    const facts = JSON.parse(String(model.mock.calls.at(-1)![0].messages[1].content)).facts;
-    expect(facts.references).toEqual([{ taste: "techno", names: ["Ben Klock", "Nina Kraviz"] }]);
-    expect(finalText(events)).toContain("reference points"); expect(model).toHaveBeenCalledTimes(3);
+    expect(finalText(events)).toContain('for techno I used Ben Klock and Nina Kraviz as reference points');
+    expect(model).toHaveBeenCalledTimes(2);
   });
 
   it("reuses text delivered with the successful patch instead of calling the model again", async () => {
     queueReply({ type: "content", text: "I set your trip to two days." }, tool("apply_changes", { ops: [{ op: "set_days", days: 2 }] }));
     const events: AgentEvent[] = [];
     await runAgent(request("only two days"), (e) => events.push(e));
-    expect(model).toHaveBeenCalledTimes(1); expect(finalText(events)).toBe("I set your trip to two days.");
+    expect(model).toHaveBeenCalledTimes(1); expect(finalText(events)).toBe("I set the trip to 2 days.");
   });
 
-  it("emits each final delta before the stream finishes", async () => {
-    let finish!: () => void;
-    const waiting = new Promise<void>((resolve) => { finish = resolve; });
-    async function* streaming(): AsyncGenerator<ChatChunk> { yield { type: "content", text: "I set two days." }; await waiting; }
-    queueReply(tool("apply_changes", { ops: [{ op: "set_days", days: 2 }] })); model.mockReturnValueOnce(streaming());
+  it("finishes the fallback with grounded facts without requesting free final prose", async () => {
+    queueReply(tool("apply_changes", { ops: [{ op: "set_days", days: 2 }] }));
     const events: AgentEvent[] = [];
-    const pending = runAgent(request(), (e) => events.push(e));
-    await vi.waitFor(() => expect(finalText(events)).toBe("I set two days."));
-    expect(events.some((e) => e.type === "done")).toBe(false); finish(); await pending;
+    await runAgent(request(), (e) => events.push(e));
+    expect(finalText(events)).toBe('I set the trip to 2 days.');
+    expect(model).toHaveBeenCalledTimes(1); expect(events.at(-1)?.type).toBe('done');
   });
 
   it("returns invalid patches privately without trace errors or partial changes", async () => {
@@ -140,7 +135,7 @@ describe("fast agent", () => {
     const events: AgentEvent[] = [];
     const pending = runAgent(request(), (e) => events.push(e));
     await vi.advanceTimersByTimeAsync(FINAL_TIMEOUT_MS); await pending;
-    expect(finalText(events)).toBe("I moved the crowd dial toward locals. Your best start is now Kreuzberg.");
+    expect(finalText(events)).toBe("I moved the crowd dial toward quieter places. Your best start is now Kreuzberg.");
   });
 
   it("continues a matching streamed prefix without duplicating the confirmation", async () => {
@@ -149,7 +144,7 @@ describe("fast agent", () => {
     queueReply(tool("apply_changes", { ops: [{ op: "set_discovery", value: 0.7 }] })); model.mockReturnValueOnce(partial());
     const events: AgentEvent[] = []; const pending = runAgent(request(), (event) => events.push(event));
     await vi.advanceTimersByTimeAsync(FINAL_TIMEOUT_MS); await pending;
-    expect(finalText(events)).toBe("I moved the crowd dial toward locals. Your best start is now Kreuzberg.");
+    expect(finalText(events)).toBe("I moved the crowd dial toward quieter places. Your best start is now Kreuzberg.");
   });
 
   it("finishes honestly after a timeout without any patches", async () => {
@@ -163,7 +158,7 @@ describe("fast agent", () => {
     vi.mocked(rankNeighborhoods).mockRejectedValue(new Error("private provider details"));
     queueReply(tool("apply_changes", { ops: [{ op: "set_discovery", value: 0.7 }] })); model.mockImplementationOnce(() => { throw new Error("final provider failed"); });
     const events: AgentEvent[] = []; await runAgent(request(), (e) => events.push(e));
-    expect(finalText(events)).toContain("moved the crowd dial toward locals"); expect(finalText(events)).toContain("ranking is not available");
+    expect(finalText(events)).toContain("moved the crowd dial toward quieter places"); expect(finalText(events)).toContain("ranking is not available");
     expect(JSON.stringify(events)).not.toContain("private provider details");
   });
 
@@ -194,7 +189,7 @@ describe("agent route", () => {
     queueReply(tool("apply_changes", { ops: [{ op: "set_days", days: 2 }] })); queueReply({ type: "content", text: "Two days.\n" }, { type: "content", text: "Ready." });
     const response = await POST(new Request("http://localhost/api/agent", { method: "POST", body: JSON.stringify(request("only two days")) }));
     const body = await response.text(); expect(body.indexOf("event: patch")).toBeLessThan(body.indexOf("event: delta"));
-    expect(body).toContain('data: {"text":"Two days.\\n"}'); expect(body).toContain("event: done\ndata: {}");
+    expect(body).toContain('data: {"text":"I set the trip to 2 days."}'); expect(body).toContain("event: done\ndata: {}");
   });
   it("emits a structured model error without a false done", async () => {
     model.mockImplementationOnce(() => { throw new Error("private provider details"); });

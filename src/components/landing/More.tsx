@@ -7,7 +7,7 @@ import { Check, Play, Plus, Search, Upload } from "lucide-react";
 import { cityName } from "@/components/ui/CityPicker";
 import { emptyState, encodeState } from "@/lib/state";
 import { useLanding } from "./LandingData";
-import { LANDING } from "./scenes";
+import { LANDING, namesText } from "./scenes";
 
 export const H2 = "text-[40px] font-[690] leading-[1.02] tracking-[-0.035em] sm:text-[56px]";
 
@@ -91,7 +91,7 @@ export function AnyCity() {
         </div>
         <div className="rounded-[28px] bg-paper-raised p-5 shadow-[var(--shadow-raised)] ring-1 ring-line sm:p-7">
           <p className="text-[13px] font-[560] text-ink-3">Which city fits</p>
-          <p className="mt-1 text-[19px] font-[620] leading-snug tracking-[-0.015em]">{LANDING.hero.loves.join(", ")}</p>
+          <p className="mt-1 text-[19px] font-[620] leading-snug tracking-[-0.015em]">{namesText(LANDING.hero.loves)}</p>
           {cities.length ? (
             <ol className="mt-5 space-y-2.5">
               {cities.map((c, i) => {

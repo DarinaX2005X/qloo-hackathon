@@ -1,4 +1,5 @@
 import type { FieldCell } from "@/shared/contracts";
+import { CROWD_LABEL, crowdFromPopularity, MATCH_EXPLAINER, MATCH_LABEL, matchIndex } from "@/lib/honest";
 
 const DOMAIN_LABEL: Record<string, string> = {
   artist: "music",
@@ -14,13 +15,12 @@ const DOMAIN_LABEL: Record<string, string> = {
   destination: "travel",
 };
 
+/** Popularity only, in the same words as the neighborhoods: never residents versus visitors. */
 export function crowdLabel(popularity: number) {
-  if (popularity > 0.85) return "busy with visitors";
-  if (popularity > 0.55) return "mixed crowd";
-  return "mostly locals";
+  return `Crowd: ${CROWD_LABEL[crowdFromPopularity(popularity)]}`;
 }
 
-/** Floating explanation of one terrain column: how strong, what drives it, who is around. */
+/** Floating explanation of one terrain column: its taste lift, what drives it, how busy it is. */
 export function CellCard({
   x,
   y,
@@ -44,16 +44,17 @@ export function CellCard({
       className="pointer-events-none absolute z-20 w-[232px] rounded-[14px] bg-paper-raised p-3 text-[13px] leading-snug shadow-[var(--shadow-overlay)]"
       style={{ left: Math.min(x + 16, (typeof window !== "undefined" ? window.innerWidth : 1400) - 260), top: Math.max(8, y - 120) }}
     >
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="font-[600] text-ink">Taste match</span>
-        <span className="tnum text-[20px] font-[650] tracking-[-0.02em] text-you-deep">{Math.round(cell.you * 100)}</span>
+      <div className="flex items-baseline justify-between gap-2" title={MATCH_EXPLAINER}>
+        <span className="font-[600] text-ink">{pair ? `Your ${MATCH_LABEL.toLowerCase()}` : MATCH_LABEL}</span>
+        <span className="tnum text-[20px] font-[650] tracking-[-0.02em] text-you-deep">{matchIndex(cell.you)}</span>
       </div>
       {pair && cell.them !== undefined && (
         <div className="mt-0.5 flex items-baseline justify-between text-ink-2">
-          <span>Their match</span>
-          <span className="tnum font-[600] text-them">{Math.round(cell.them * 100)}</span>
+          <span>Their {MATCH_LABEL.toLowerCase()}</span>
+          <span className="tnum font-[600] text-them">{matchIndex(cell.them)}</span>
         </div>
       )}
+      <p className="mt-0.5 text-[11.5px] text-ink-3">This map cell, 0 to 100; 50 is neutral</p>
       {drivers.length > 0 && (
         <ul className="mt-2 space-y-1">
           {drivers.map(([d, v]) => (

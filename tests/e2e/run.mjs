@@ -787,14 +787,14 @@ try {
       await poll(async () => {
         for (const li of await matches.all()) {
           const text = await li.innerText();
-          const sim = text.match(/(\d{1,3})\s*%\s*alike/);
+          const sim = text.match(/(\d{1,3})\s*%\s*taste-tag similarity/);
           const twins = await li.getByText('at home', { exact: true }).count();
           const shares = await li.getByText('Shares', { exact: true }).count();
           if (sim && (twins || shares)) { evidence = { name: text.split('\n').map(s => s.trim()).filter(Boolean)[1], similarity: Number(sim[1]), twinPairs: twins, sharedTags: !!shares }; return true; }
         }
         return false;
-      }, 'A match with "% alike" and a twin pair (old place → new place) or Shares tags', LOAD_TIMEOUT);
-      assert.ok(evidence.similarity > 0 && evidence.similarity <= 100, `Similarity out of range: ${evidence.similarity}`);
+      }, 'A match with "% taste-tag similarity" and a twin pair (old place → new place) or Shares tags', LOAD_TIMEOUT);
+      assert.ok(evidence.similarity >= 0 && evidence.similarity <= 100, `Similarity out of range: ${evidence.similarity}`);
       const legend = page.getByText(/The terrain shows\s+Kreuzberg, Berlin\s+printed over Lisbon/);
       await legend.waitFor({ state: 'visible' });
       const ms = Math.round(performance.now() - begin);
@@ -820,7 +820,7 @@ try {
       await percentile.waitFor({ state: 'visible', timeout: LOAD_TIMEOUT });
       const n = Number((await percentile.innerText()).match(/Better than\s*(\d+)\s*%/)?.[1]);
       assert.ok(n > 0 && n <= 100, `Better than N% out of range: ${await percentile.innerText()}`);
-      const hood = panel.getByText(/^In .+, ranked #\d+ for you$/);
+      const hood = panel.getByText(/^In .+, ranked #\d+ for you/);
       await hood.waitFor({ state: 'visible' });
       const hoodName = (await hood.innerText()).match(/^In (.+), ranked #\d+/)[1].trim();
       assert.ok(hoodName.length > 1, 'Empty neighborhood name');
@@ -881,7 +881,7 @@ try {
     });
   });
   await scenario('20', 'What decides: summary and a row per love for the first neighborhood', async () => {
-    await step('Why shows the summary and, for #1, every love with a rank or Out of the top 8', page, async () => {
+    await step('Why shows the summary and, for #1, every love with a rank or out of the top 8', page, async () => {
       assert.ok(chipState?.l?.length >= 2, 'Resolved taste state unavailable');
       const decides = page.waitForResponse(r => apiPath(r, '/api/decides') && r.ok(), { timeout: LOAD_TIMEOUT + 15_000 });
       void decides.catch(() => {});
@@ -895,11 +895,11 @@ try {
       const loves = stateOf(page).l.filter(l => l.id && (l.w ?? 1) > 0);
       const firstHood = panel.locator('section').first();
       await firstHood.waitFor({ state: 'visible' });
-      const name = (await firstHood.getByRole('button').first().innerText()).replace(/\s+/g, ' ').replace(/^\d+\s*|\s*without each love$/g, '').trim();
+      const name = (await firstHood.getByRole('button').first().innerText()).replace(/\s+/g, ' ').replace(/^\d+\s*|\s*one love at a time$/g, '').trim();
       const rows = firstHood.locator('li');
       await poll(async () => await rows.count() === loves.length, `First neighborhood has one row per love (${loves.length})`);
       const texts = (await rows.allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim());
-      for (const t of texts) assert.match(t, /#\d+|Out of the top 8/, `Row without a rank: "${t}"`);
+      for (const t of texts) assert.match(t, /#\d+|out of the top 8/i, `Row without a rank: "${t}"`);
       for (const love of loves) assert.ok(texts.some(t => t.toLowerCase().includes((love.n || love.q).toLowerCase())), `No row for ${love.n || love.q}: ${JSON.stringify(texts)}`);
       await mapReady(page);
       await shot(page, 'why');

@@ -50,7 +50,7 @@ export function Segmented<T extends string>({
             role="radio"
             aria-checked={on}
             onClick={() => onChange(o.value)}
-            className={`relative z-0 flex-1 rounded-[9px] px-2.5 font-[550] transition-colors ${size === "sm" ? "h-7 text-[12.5px]" : "h-8 text-[13.5px]"} ${on ? "text-ink" : "text-ink-2 hover:text-ink"}`}
+            className={`relative z-0 flex-1 rounded-[9px] px-2.5 font-[550] transition-colors ${size === "sm" ? "min-h-7 py-0.5 text-[12.5px]" : "min-h-8 py-1 text-[13.5px]"} leading-tight ${on ? "text-ink" : "text-ink-2 hover:text-ink"}`}
           >
             {on && (
               <motion.span

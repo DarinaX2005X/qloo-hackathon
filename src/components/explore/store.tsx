@@ -57,6 +57,18 @@ export type MapOverlay = {
 };
 
 type Pending = Record<string, true>; // queries being looked up
+
+/** Rules that shaped the current plan and are sent with every re-plan: whole categories and place tags
+ *  left out (the assistant's "no museums"). Must-include places live in `include`. */
+export type PlanRules = { excludeCategories: Category[]; excludeTags: string[] };
+const noRules = (): PlanRules => ({ excludeCategories: [], excludeTags: [] });
+/** The options a plan was built with, as the PlanRequest names them. */
+export type PlanOptions = { excludeCategories?: Category[]; excludeTags?: string[]; include?: string[] };
+
+/** One city of a comparison: scored on its own request, so each card shows as soon as it is ready. */
+export type CityRun = { city: string; status: "queued" | "loading" | "done" | "error"; data?: CityScore; error?: HomingError };
+export type CityCompareState = { asked: string[]; runs: CityRun[]; running: boolean };
+const CITY_CONCURRENCY = 2;
 export type Toast = { id: number; text: string; undo?: () => void };
 
 const RECENT_KEY = "homing.recent";
@@ -79,6 +91,8 @@ function useStore() {
   const [print, setPrint] = useState<Load<Fingerprint>>(idle);
   const [places, setPlaces] = useState<Load<Place[]>>(idle);
   const [plan, setPlan] = useState<Load<Itinerary>>(idle);
+  const planRef = useRef<Itinerary | null>(null);
+  planRef.current = plan.data;
   const [pending, setPending] = useState<Pending>({});
   const [chat, setChat] = useState<ChatTurn[]>([]);
   const [agentBusy, setAgentBusy] = useState(false);
@@ -91,7 +105,13 @@ function useStore() {
   const [openPlace, setOpenPlace] = useState<Place | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
-  const [cities, setCities] = useState<Load<CityScore[]> & { asked: string[] }>({ data: null, loading: false, error: null, asked: [] });
+  const [cities, setCities] = useState<CityCompareState>({ asked: [], runs: [], running: false });
+  const citiesRun = useRef<{ ac: AbortController; seq: number } | null>(null);
+  /** where the plan on screen came from: the planner on the Trip screen, or a plan the assistant built */
+  const [planFrom, setPlanFrom] = useState<"planner" | "assistant">("planner");
+  const [planRules, setPlanRules] = useState<PlanRules>(noRules);
+  const planRulesRef = useRef(planRules);
+  planRulesRef.current = planRules;
   const [swapping, setSwapping] = useState<string | null>(null);
   const [overlayRaw, setOverlayRaw] = useState<{ o: MapOverlay; path: string } | null>(null);
   const [planDay, setPlanDay] = useState(0);
@@ -253,10 +273,11 @@ function useStore() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id, fk, nonce, state.budget]);
 
-  const makePlan = useCallback(async (opts: { exclude?: string[]; include?: string[] } = {}) => {
+  const makePlan = useCallback(async (opts: { exclude?: string[]; include?: string[]; rules?: PlanRules } = {}) => {
     const s = stateRef.current;
     const ex = opts.exclude ?? excludeRef.current;
     const inc = opts.include ?? includeRef.current;
+    const rules = opts.rules ?? planRulesRef.current;
     const ranked = hoods.data ?? [];
     if (!s.neighborhood && !ranked.length) return;
     const first = s.neighborhood ?? ranked[0].id;
@@ -264,8 +285,9 @@ function useStore() {
     const ids = [first, ...rest].slice(0, s.days);
     const seq = ++planSeq.current;
     setPlan({ data: null, loading: true, error: null });
+    setPlanFrom("planner");
     try {
-      const data = await api.plan(s, ids, { exclude: ex, include: inc });
+      const data = await api.plan(s, ids, { exclude: ex, include: inc, excludeCategories: rules.excludeCategories, excludeTags: rules.excludeTags });
       if (seq === planSeq.current) {
         setPlan({ data, loading: false, error: null });
         setPlanDay((d) => (d < data.days.length ? d : 0));
@@ -288,6 +310,7 @@ function useStore() {
     setPlan(idle());
     setExclude([]);
     setInclude([]);
+    setPlanRules(noRules());
     setOpenPlace(null);
     setCompare([]);
   }, [state.city]);
@@ -366,17 +389,84 @@ function useStore() {
     await makePlan({ include: inc });
   }, [makePlan, saved]);
 
-  // --- compare cities with the same taste
-  const compareCities = useCallback(async (list: string[]) => {
-    const asked = [...new Set(list.map((c) => c.trim()).filter(Boolean))].slice(0, 5);
-    if (asked.length < 2) return;
-    setCities({ data: null, loading: true, error: null, asked });
-    try {
-      setCities({ data: await api.cities(stateRef.current, asked), loading: false, error: null, asked });
-    } catch (e) {
-      setCities({ data: null, loading: false, error: e as HomingError, asked });
-    }
+  /** A plan the assistant built, opened on the Trip screen as the current plan, with the rules it was built with
+   *  so that Plan again and changing days, pace or start keep them. */
+  const showPlan = useCallback((itinerary: Itinerary, options: PlanOptions = {}) => {
+    planSeq.current++;
+    setExclude([]);
+    setInclude([...new Set(options.include ?? [])].slice(0, 12));
+    setPlanRules({ excludeCategories: [...new Set(options.excludeCategories ?? [])], excludeTags: [...new Set(options.excludeTags ?? [])] });
+    setPlan({ data: itinerary, loading: false, error: null });
+    setPlanDay(0);
+    setPlanFrom("assistant");
   }, []);
+
+  /** Take one rule off the plan and plan again without it. */
+  const removePlanRule = useCallback(
+    async (rule: { kind: "category"; value: Category } | { kind: "tag"; value: string } | { kind: "include"; value: string }) => {
+      if (rule.kind === "include") {
+        const inc = includeRef.current.filter((id) => id !== rule.value);
+        setInclude(inc);
+        if (planRef.current) await makePlan({ include: inc });
+        return;
+      }
+      const cur = planRulesRef.current;
+      const next: PlanRules =
+        rule.kind === "category"
+          ? { ...cur, excludeCategories: cur.excludeCategories.filter((c) => c !== rule.value) }
+          : { ...cur, excludeTags: cur.excludeTags.filter((t) => t !== rule.value) };
+      setPlanRules(next);
+      if (planRef.current) await makePlan({ rules: next });
+    },
+    [makePlan],
+  );
+
+  // --- compare cities with the same taste: one request per city, two at a time, each card shown when it lands
+  const setRun = useCallback((seq: number, city: string, run: Partial<CityRun>) => {
+    if (citiesRun.current?.seq !== seq) return;
+    setCities((c) => ({ ...c, runs: c.runs.map((r) => (r.city === city ? { ...r, ...run } : r)) }));
+  }, []);
+  const scoreOneCity = useCallback(
+    async (seq: number, city: string, signal: AbortSignal) => {
+      setRun(seq, city, { status: "loading", error: undefined });
+      try {
+        const data = await api.city(stateRef.current, city, signal);
+        // the server can answer with a card that carries its own error (thin data, a timeout for that city)
+        if (data.error) setRun(seq, city, { status: "error", data: undefined, error: new HomingError("not_found", data.error, true) });
+        else setRun(seq, city, { status: "done", data, error: undefined });
+      } catch (e) {
+        const err = e as HomingError;
+        if (err.code !== "aborted") setRun(seq, city, { status: "error", error: err });
+      }
+    },
+    [setRun],
+  );
+  const compareCities = useCallback(
+    async (list: string[]) => {
+      const asked = [...new Set(list.map((c) => c.trim()).filter(Boolean))].slice(0, 5);
+      if (asked.length < 2) return;
+      citiesRun.current?.ac.abort();
+      const run = { ac: new AbortController(), seq: (citiesRun.current?.seq ?? 0) + 1 };
+      citiesRun.current = run;
+      setCities({ asked, runs: asked.map((city) => ({ city, status: "queued" })), running: true });
+      let next = 0;
+      const worker = async () => {
+        while (next < asked.length && !run.ac.signal.aborted) await scoreOneCity(run.seq, asked[next++], run.ac.signal);
+      };
+      await Promise.all(Array.from({ length: Math.min(CITY_CONCURRENCY, asked.length) }, worker));
+      if (citiesRun.current === run) setCities((c) => ({ ...c, running: false }));
+    },
+    [scoreOneCity],
+  );
+  /** Score one city of the current comparison again; the cards already there stay. */
+  const retryCity = useCallback(
+    async (city: string) => {
+      const run = citiesRun.current;
+      if (!run) return;
+      await scoreOneCity(run.seq, city, run.ac.signal);
+    },
+    [scoreOneCity],
+  );
 
   // --- loves
   const addLove = useCallback(
@@ -537,6 +627,11 @@ function useStore() {
     setCompare,
     cities,
     compareCities,
+    retryCity,
+    showPlan,
+    planFrom,
+    planRules,
+    removePlanRule,
     state,
     hydrated,
     patch,

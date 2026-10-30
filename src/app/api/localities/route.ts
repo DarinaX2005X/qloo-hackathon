@@ -12,7 +12,7 @@ const cache = new Map<string, Locality[]>();
 export async function GET(request: Request): Promise<Response> {
   try {
     const q = (new URL(request.url).searchParams.get("q") ?? "").trim();
-    if (q.length < 2) return Response.json({ results: [] });
+    if (q.length < 3) return Response.json({ results: [] });
     if (q.length > 80) throw apiError("bad_input", "That city name is too long.");
     const key = q.toLowerCase();
     const hit = cache.get(key);

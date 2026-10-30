@@ -74,7 +74,7 @@ export function HomeScreen() {
       <ScreenPanel label="Feels like home" testId="home-screen">
         <ScreenTitle
           title="Feels like home"
-          lead={<>Name a neighborhood you loved living in. Homing finds the part of {here} where people with the same taste spend their time.</>}
+          lead={<>Name a neighborhood you loved living in. Homing reads the places that define it in Qloo and finds where that taste shows up in {here}.</>}
         />
 
         <form
@@ -134,7 +134,7 @@ export function HomeScreen() {
                 if (result && f.home.request) run(f.home.request, v);
               }}
               options={[
-                { value: "home", label: "Only the old neighborhood" },
+                { value: "home", label: "Old neighborhood only" },
                 { value: "mix", label: "Mix in what I love" },
               ]}
             />

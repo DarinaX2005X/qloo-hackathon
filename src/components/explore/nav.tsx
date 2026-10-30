@@ -25,7 +25,7 @@ export const SCREENS: Screen[] = [
   { path: "/explore", label: "Map", title: "Map", blurb: "Your taste over the city and the ranked neighborhoods.", icon: MapIcon, tab: true },
   { path: "/explore/assistant", label: "Assistant", title: "Assistant", blurb: "Ask in your own words and Homing changes the map for you.", icon: MessagesSquare, tab: true },
   { path: "/explore/home", label: "Home", title: "Feels like home", blurb: "Find the part of this city that feels like a neighborhood you loved.", icon: House, tab: true },
-  { path: "/explore/address", label: "Address", title: "Check an address", blurb: "See how one exact flat or street fits your taste.", icon: MapPin, tab: true },
+  { path: "/explore/address", label: "Address", title: "Check an address", blurb: "See how the area around a flat fits your taste.", icon: MapPin, tab: true },
   { path: "/explore/why", label: "Why", title: "What decides", blurb: "Which of your loves the ranking really rests on.", icon: Scale, tab: false },
   { path: "/explore/trip", label: "Trip", title: "Trip", blurb: "Your first days, day by day, and the places you saved.", icon: Route, tab: false },
   { path: "/explore/compare", label: "Compare", title: "Compare", blurb: "Two neighborhoods side by side, or the same taste in other cities.", icon: Columns2, tab: false },

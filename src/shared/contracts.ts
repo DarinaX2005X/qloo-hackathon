@@ -53,7 +53,7 @@ export const ExploreState = z.object({
   city: z.string().min(1).max(80),
   loves: z.array(ResolvedLove).max(LIMITS.loves),
   refinements: z.array(TagRef).max(LIMITS.refinements).default([]),
-  /** 0 = popular, 1 = local. */
+  /** 0 = popular, 1 = less popular; no inference about locals or tourists. */
   discovery: z.number().min(0).max(1).default(0.35),
   companion: z
     .object({ loves: z.array(ResolvedLove).max(LIMITS.companionLoves) })
@@ -84,6 +84,9 @@ export const FieldCell = z.object({
   popularity: z.number(),
   /** Share of the person's score coming from each domain, sums to ~1. */
   drivers: z.record(z.string(), z.number()),
+  /** Diagnostic raw taste-ratio lift before the crowd dial. Not the neighborhood display metric. */
+  lift: z.number().optional(),
+  themLift: z.number().optional(),
 });
 export type FieldCell = z.infer<typeof FieldCell>;
 
@@ -105,7 +108,7 @@ export const Neighborhood = z.object({
   id: z.string(),
   name: z.string(),
   center: z.tuple([z.number(), z.number()]), // [lon, lat]
-  /** 0..1 ranking score (for two people: fairness score). */
+  /** 0..1 coverage-shrunk match score after crowd preference; min(you, them) for couples. */
   score: z.number(),
   you: z.number(),
   them: z.number().optional(),
@@ -115,6 +118,15 @@ export const Neighborhood = z.object({
   vibe: Vibe,
   samplePlaces: z.array(z.string()),
   cellIds: z.array(z.string()),
+  /** With liftKind=adjusted_match: exactly 2*score-1, relative to the neutral .5 match reference.
+   * Includes coverage, refinements, crowd and couple fairness. Not raw affinity lift or a probability.
+   * Older payloads without liftKind used mean raw cell ratio lift; do not compare the two meanings. */
+  lift: z.number().optional(),
+  liftKind: z.literal("adjusted_match").optional(),
+  /** Present on #1 when every scored area has negative adjusted match lift. */
+  rankingNote: z.string().optional(),
+  /** Legacy vibe describes popularity only, never residency or visitor origin. */
+  crowd: z.enum(["quiet", "moderate", "busy"]).optional(),
 });
 export type Neighborhood = z.infer<typeof Neighborhood>;
 
@@ -143,6 +155,10 @@ export const Place = z.object({
   website: z.string().optional(),
   /** short descriptive keywords from Qloo, most mentioned first */
   keywords: z.array(z.string()).optional(),
+  /** Qloo tags retained for explicit planning exclusions; category tags are not explanations. */
+  tags: z.array(TagRef).optional(),
+  /** Raw Qloo tag/type/primary-genre identifiers retained even when their display name is absent. */
+  classifications: z.array(z.string()).optional(),
 });
 export type Place = z.infer<typeof Place>;
 
@@ -152,6 +168,8 @@ export const Stop = z.object({
   place: Place,
   walkMin: z.number(),
   hoursNote: z.enum(["open", "hours not listed"]).optional(),
+  walkIsApproximate: z.literal(true).optional(),
+  reasonCodes: z.array(z.string()).optional(),
 });
 export type Stop = z.infer<typeof Stop>;
 
@@ -163,6 +181,8 @@ export const Itinerary = z.object({
       neighborhood: z.string(),
       stops: z.array(Stop),
       missing: z.array(z.string()).default([]), // slots we could not fill
+      note: z.string().optional(),
+      issues: z.array(z.object({ slot: z.string(), reason: z.string() })).optional(),
     }),
   ),
 });
@@ -230,6 +250,8 @@ export const PlanRequest = ExploreState.extend({
   exclude: z.array(z.string()).max(60).default([]),
   /** place ids the person wants in the plan (from the shortlist); placed in fitting slots first */
   include: z.array(z.string()).max(12).default([]),
+  excludeCategories: z.array(Category).max(5).optional(),
+  excludeTags: z.array(z.string().max(120)).max(20).optional(),
 });
 
 /** One city scored for the same taste, for the "where should I go" comparison. */
@@ -247,7 +269,7 @@ export const CityScore = z.object({
   error: z.string().optional(),
 });
 export type CityScore = z.infer<typeof CityScore>;
-export const CitiesRequest = z.object({ state: ExploreState, cities: z.array(z.string().min(1).max(80)).min(2).max(5) });
+export const CitiesRequest = z.object({ state: ExploreState, cities: z.array(z.string().min(1).max(80)).min(1).max(5) });
 export const CitiesResponse = z.object({ cities: z.array(CityScore) });
 
 // ---------- Feels like home: a neighborhood you loved, translated into another city
@@ -282,7 +304,7 @@ export const HomeResult = z.object({
   /** for the top neighborhoods: what they share with home and which places stand in for which */
   matches: z.array(z.object({
     neighborhoodId: z.string(),
-    /** 0..100, how close it feels to home (top match is not forced to 100) */
+    /** 0..100 weighted Jaccard similarity of the areas' Qloo taste-tag frequency profiles. */
     similarity: z.number(),
     sharedTags: z.array(z.string()).max(4),
     twins: z.array(z.object({ source: HomePlace, target: HomePlace })).max(3),
@@ -299,6 +321,9 @@ export const SpotRequest = z.object({
 }).refine((r) => r.query || r.point, { message: "query or point is required" });
 export type SpotRequest = z.infer<typeof SpotRequest>;
 export const SpotResult = z.object({
+  resolutionM: z.number().positive().optional(),
+  walkIsApproximate: z.literal(true).optional(),
+  estimateScope: z.literal("neighborhood").optional(),
   label: z.string(),
   point: LonLat,
   /** 0..1, the field value at the spot */
@@ -335,6 +360,15 @@ export type DecidesResult = z.infer<typeof DecidesResult>;
 
 /** Rich results the agent can attach to its reply, shown as cards in the assistant. */
 export type AgentCard =
+  | { kind: "plan"; itinerary: Itinerary; options?: {
+      excludeCategories?: Category[];
+      excludeTags?: string[];
+      /** Resolved place IDs supplied to the planner, never unresolved names. */
+      include?: string[];
+      days?: ExploreState["days"];
+      pace?: ExploreState["pace"];
+      startHour?: number;
+    } }
   | { kind: "ranking"; neighborhoods: Neighborhood[] }
   | { kind: "home"; result: HomeResult }
   | { kind: "spot"; result: SpotResult }

@@ -7,6 +7,9 @@ import { activeLoves } from "@/shared/contracts";
 import { useExplore } from "@/components/explore/store";
 import { LOVE_INKS } from "@/components/explore/inks";
 import { cityName } from "@/components/ui/CityPicker";
+import { decidesStatement } from "@/lib/explain";
+import { gridText, SIMILARITY_LABEL, twinSharedTag, walkText } from "@/lib/honest";
+import { BelowNeutralNote, MatchExplainer, MatchValue } from "@/components/ui/Match";
 
 type HomePlace = HomeResult["source"]["places"][number];
 
@@ -53,11 +56,14 @@ function PlaceChip({ p }: { p: HomePlace }) {
   );
 }
 
+/** A suggested counterpart: a place here that shares a taste tag with a place from home. Not a claim that they are the same. */
 function TwinPair({ from, to, compact }: { from: HomePlace; to: HomePlace; compact?: boolean }) {
   const cat = to.category ?? from.category;
   const Icon = cat ? CAT_ICON[cat] : Landmark;
   const card = "min-w-0 flex-1 rounded-[11px] px-2.5 py-1.5";
+  const tag = twinSharedTag(from, to);
   return (
+    <div>
     <div className="flex items-stretch gap-1.5">
       <div className={`${card} bg-paper-sunk`}>
         <p className={`truncate font-[580] text-ink-2 ${compact ? "text-[12.5px]" : "text-[13px]"}`}>{from.name}</p>
@@ -74,6 +80,25 @@ function TwinPair({ from, to, compact }: { from: HomePlace; to: HomePlace; compa
         {!compact && <p className="truncate text-[11.5px] text-ink-3">{cat ? `${CAT_LABEL[cat]} here` : "here"}</p>}
       </div>
     </div>
+    <p className={`mt-1 text-ink-3 ${compact ? "text-[11.5px]" : "text-[12px]"}`}>
+      Suggested counterpart{tag ? <> that shares <span className="font-[580] text-ink-2">{tag}</span></> : " of the same kind"}
+    </p>
+    </div>
+  );
+}
+
+function NoTwin({ compact }: { compact?: boolean }) {
+  return <p className={`text-ink-3 ${compact ? "text-[12px]" : "text-[12.5px]"}`}>No close twin found: no place here shares a telling taste tag with one from home.</p>;
+}
+
+/** "29%" over "taste-tag similarity": weighted overlap of the areas' Qloo taste tags, zero allowed. */
+function Similarity({ value, size = "md" }: { value: number; size?: "md" | "lg" }) {
+  const v = Math.max(0, Math.min(100, Math.round(value)));
+  return (
+    <span className="shrink-0 text-right" title="How much the Qloo taste tags of this area's places overlap with those of the old neighborhood, from 0 to 100%. Not a ranking.">
+      <span className={`tnum block leading-none ${size === "lg" ? "text-[19px] font-[670]" : "text-[18px] font-[660]"} ${v > 0 ? "text-ink" : "text-ink-3"}`}>{v}%</span>
+      <span className="mt-0.5 block whitespace-nowrap text-[11px] font-[500] text-ink-3">{SIMILARITY_LABEL}</span>
+    </span>
   );
 }
 
@@ -109,18 +134,17 @@ export function HomeCard({
         </p>
         {top ? (
           <>
-            <div className="mt-1 flex items-baseline justify-between gap-2">
-              <span className="truncate text-[18px] font-[650] tracking-[-0.02em]">{top.n.name}</span>
-              <span className="tnum shrink-0 text-[18px] font-[660] text-you">{Math.round(top.m.similarity)}%</span>
+            <div className="mt-1 flex items-start justify-between gap-2">
+              <span className="min-w-0">
+                <span className="block truncate text-[18px] font-[650] tracking-[-0.02em]">{top.n.name}</span>
+                <MatchValue score={top.n.score} size="sm" />
+              </span>
+              <Similarity value={top.m.similarity} />
             </div>
-            {top.m.twins[0] && (
-              <div className="mt-2">
-                <TwinPair from={top.m.twins[0].source} to={top.m.twins[0].target} compact />
-              </div>
-            )}
+            <div className="mt-2">{top.m.twins[0] ? <TwinPair from={top.m.twins[0].source} to={top.m.twins[0].target} compact /> : <NoTwin compact />}</div>
             {matches.length > 1 && (
               <p className="mt-2 text-[12.5px] text-ink-2">
-                Then {matches.slice(1).map((x) => `${x.n.name} (${Math.round(x.m.similarity)}%)`).join(" and ")}.
+                Then {matches.slice(1).map((x) => `${x.n.name} (${Math.round(x.m.similarity)}% ${SIMILARITY_LABEL})`).join(" and ")}.
               </p>
             )}
           </>
@@ -146,10 +170,13 @@ export function HomeCard({
             ))}
           </div>
         )}
-        <p className="mt-2.5 text-[12px] leading-snug text-ink-3">Homing reads these places in Qloo and looks for people with the same taste in {here}.</p>
+        <p className="mt-2.5 text-[12px] leading-snug text-ink-3">Homing reads these places in Qloo and looks for where the same taste shows up in {here}.</p>
       </section>
 
-      <h3 className="mb-2 mt-5 text-[15px] font-[620] tracking-[-0.01em]">Feels closest in {here}</h3>
+      <h3 className="mt-5 text-[15px] font-[620] tracking-[-0.01em]">Closest in {here}</h3>
+      <p className="mb-2.5 mt-0.5 text-[12.5px] leading-snug text-ink-3">
+        Ordered by the old neighborhood&apos;s taste map. The percentage is {SIMILARITY_LABEL}: how much the Qloo taste tags of the places overlap, and it can be low.
+      </p>
       {!matches.length && <p className="text-[14px] text-ink-2">Nothing in {here} came close enough to compare. Try another neighborhood or mix in what you love.</p>}
       <ol className="space-y-2.5">
         {matches.map(({ m, n }, i) => {
@@ -165,14 +192,14 @@ export function HomeCard({
               >
                 <div className="flex items-center gap-3">
                   <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${i === 0 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{i + 1}</span>
-                  <span className="min-w-0 flex-1 truncate text-[17px] font-[630] tracking-[-0.015em]">{n.name}</span>
-                  <span className="shrink-0 text-right">
-                    <span className="tnum text-[19px] font-[670] text-ink">{Math.round(m.similarity)}</span>
-                    <span className="ml-0.5 text-[12px] text-ink-3">% alike</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[17px] font-[630] tracking-[-0.015em]">{n.name}</span>
+                    <MatchValue score={n.score} size="sm" />
                   </span>
+                  <Similarity value={m.similarity} size="lg" />
                 </div>
                 <div className="ml-10 mt-2 h-1.5 overflow-hidden rounded-full bg-paper-sunk">
-                  <motion.div className="h-full rounded-full bg-you" initial={{ width: 0 }} animate={{ width: `${Math.max(2, Math.min(100, m.similarity))}%` }} transition={{ duration: 0.7, delay: 0.1 + i * 0.06, ease: [0.2, 0.8, 0.2, 1] }} />
+                  <motion.div className="h-full rounded-full bg-you" initial={{ width: 0 }} animate={{ width: `${Math.max(0, Math.min(100, m.similarity))}%` }} transition={{ duration: 0.7, delay: 0.1 + i * 0.06, ease: [0.2, 0.8, 0.2, 1] }} />
                 </div>
                 {m.sharedTags.length > 0 && (
                   <div className="ml-10 mt-2.5 flex flex-wrap items-center gap-1">
@@ -184,19 +211,21 @@ export function HomeCard({
                     ))}
                   </div>
                 )}
-                {m.twins.length > 0 && (
-                  <div className="mt-3 space-y-1.5">
-                    {m.twins.map((t) => (
-                      <TwinPair key={`${t.source.id}-${t.target.id}`} from={t.source} to={t.target} />
-                    ))}
-                  </div>
-                )}
+                <div className="mt-3 space-y-2">
+                  {m.twins.length > 0 ? m.twins.map((t) => <TwinPair key={`${t.source.id}-${t.target.id}`} from={t.source} to={t.target} />) : <NoTwin />}
+                </div>
                 {on && activeNote && <div className="mt-3 border-t border-line pt-2.5 text-[13px] text-ink-2">{activeNote}</div>}
               </div>
             </motion.li>
           );
         })}
       </ol>
+      <BelowNeutralNote
+        show={result.neighborhoods.some((n) => !!n.rankingNote)}
+        text={`None of the mapped areas of ${here} stands out for this taste; these are the closest, below the neutral 50.`}
+        className="mt-3"
+      />
+      {matches.length > 0 && <MatchExplainer className="mt-3" />}
     </div>
   );
 }
@@ -211,6 +240,13 @@ function StatTile({ n, label, icon: Icon }: { n: number; label: string; icon: ty
       <p className="mt-1 text-[11.5px] leading-tight text-ink-3">{label}</p>
     </div>
   );
+}
+
+/** The geocoder found the street but not the house number. Read from a flag if the backend sends one,
+ *  otherwise from the verdict it writes in that case. */
+function streetOnly(r: SpotResult) {
+  const flags = r as SpotResult & { streetLevel?: boolean; match?: string; precision?: string };
+  return flags.streetLevel === true || flags.match === "street" || flags.precision === "street" || /house number not found/i.test(r.verdict);
 }
 
 export function SpotCard({
@@ -229,20 +265,25 @@ export function SpotCard({
   const nb = result.neighborhood;
   const drivers = result.drivers.filter((d) => d.share > 0.01);
   const c = result.counts;
+  const street = streetOnly(result);
+  const approx = result.walkIsApproximate ?? true;
+  const grid = gridText(result.resolutionM);
+  const nbScore = nb ? ex.hoods.data?.find((n) => n.id === nb.id)?.score : undefined;
 
   if (compact)
     return (
       <div className="rounded-[18px] bg-paper-raised p-3.5 ring-1 ring-line">
-        <p className="truncate text-[12.5px] font-[560] text-ink-3">{result.label}</p>
+        <p className="truncate text-[12.5px] font-[560] text-ink-3">{result.label}{street ? ", street only" : ""}</p>
         <p className="mt-1 text-[14px] leading-snug text-ink-2">
           Better than <span className="tnum text-[22px] font-[680] tracking-[-0.02em] text-you">{pct}%</span> of {city} for your taste
         </p>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-paper-sunk">
           <div className="h-full rounded-full bg-you" style={{ width: `${Math.max(2, pct)}%` }} />
         </div>
-        <p className="mt-2 text-[12.5px] text-ink-2">
+        <p className="mt-1.5 text-[11.5px] text-ink-3">{grid}</p>
+        <p className="mt-1.5 text-[12.5px] text-ink-2">
           {nb ? `In ${nb.name}, #${nb.rank} for you. ` : ""}
-          {c.coffee} cafés, {c.food} places to eat and {c.drinks} bars within a 12 minute walk.
+          Among the places Qloo returned: {c.coffee} cafés, {c.food} places to eat and {c.drinks} bars that fit you within {approx ? "\u2248 " : ""}12 min walk.
         </p>
       </div>
     );
@@ -256,7 +297,12 @@ export function SpotCard({
       <p className="text-[14.5px] leading-snug text-ink-2">{result.verdict}</p>
 
       <section className="mt-4 rounded-[20px] bg-[color-mix(in_oklch,var(--you)_6%,var(--paper-raised))] p-4 ring-1 ring-[color-mix(in_oklch,var(--you)_24%,transparent)]">
-        <p className="truncate text-[12.5px] font-[580] text-ink-3">{result.label}</p>
+        <p className="truncate text-[12.5px] font-[580] text-ink-3" data-testid="spot-label">{result.label}</p>
+        {street && (
+          <p data-testid="spot-street-only" className="mt-1.5 inline-flex rounded-[8px] bg-[color-mix(in_oklch,var(--warn)_16%,var(--paper-raised))] px-2 py-1 text-[12px] font-[580] leading-snug text-ink">
+            Matched the street only: the house number was not found, so this is scored at a point on the street.
+          </p>
+        )}
         <p className="mt-1 text-[17px] font-[580] leading-[1.15] tracking-[-0.01em] text-ink-2" data-testid="spot-percentile">
           Better than{" "}
           <motion.span
@@ -270,20 +316,12 @@ export function SpotCard({
           </motion.span>{" "}
           of {city} for your taste
         </p>
-        <div className="mt-3.5">
-          <div className="mb-1 flex justify-between text-[12px] text-ink-3">
-            <span>Taste score here</span>
-            <span className="tnum font-[600] text-ink">{Math.round(result.score * 100)}</span>
-          </div>
-          <div className="relative h-2 rounded-full bg-paper-sunk">
-            <motion.div
-              className="h-full rounded-full bg-you"
-              initial={{ width: 0 }}
-              animate={{ width: `${Math.max(2, result.score * 100)}%` }}
-              transition={{ duration: 0.7, ease: [0.2, 0.8, 0.2, 1] }}
-            />
-          </div>
-        </div>
+        <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] leading-snug text-ink-3">
+          <span data-testid="spot-grid" className="rounded-[7px] bg-paper-raised px-2 py-0.5 font-[580] text-ink-2 ring-1 ring-line">
+            {grid}
+          </span>
+          <span>Flats a few streets apart score alike; this describes the area, not the building.</span>
+        </p>
         {nb && (
           <button
             onClick={() => onPickNeighborhood?.(nb.id)}
@@ -292,6 +330,12 @@ export function SpotCard({
           >
             <span className="min-w-0 text-[14px] text-ink-2">
               In <b className="font-[620] text-ink">{nb.name}</b>, ranked <span className="tnum">#{nb.rank}</span> for you
+              {nbScore !== undefined && (
+                <>
+                  {" \u00b7 "}
+                  <MatchValue score={nbScore} size="sm" />
+                </>
+              )}
             </span>
             {onPickNeighborhood && <ArrowRight size={15} className="shrink-0 text-ink-3" />}
           </button>
@@ -326,7 +370,10 @@ export function SpotCard({
       )}
 
       <section className="mt-5">
-        <h3 className="mb-2 text-[15px] font-[620] tracking-[-0.01em]">Within a 12 minute walk</h3>
+        <h3 className="text-[15px] font-[620] tracking-[-0.01em]">Within {approx ? "\u2248 " : ""}12 min walk</h3>
+        <p className="mb-2 mt-0.5 text-[12px] leading-snug text-ink-3">
+          {approx ? "Walking times are approximate: straight-line distance, not a route. " : ""}Counts are the places Qloo returned that fit your taste, not every venue nearby.
+        </p>
         <div className="grid grid-cols-5 gap-1.5">
           <StatTile n={c.coffee} label="cafés" icon={Coffee} />
           <StatTile n={c.food} label="food" icon={UtensilsCrossed} />
@@ -361,7 +408,7 @@ export function SpotCard({
                           {w.place.why.length > 0 && <span className="block truncate text-[12px] text-ink-3">{w.place.why.slice(0, 3).join(", ")}</span>}
                         </span>
                         <span className="tnum flex shrink-0 items-center gap-1 text-[12.5px] font-[560] text-ink-2">
-                          <Footprints size={13} className="text-ink-3" /> {Math.max(1, Math.round(w.minutes))} min
+                          <Footprints size={13} className="text-ink-3" /> {walkText(w.minutes, approx)}
                         </span>
                       </a>
                     </li>
@@ -412,7 +459,7 @@ function Slope({ from, to, delay = 0 }: { from: number; to: number | null; delay
 }
 
 function moveLabel(rank: number, w: Without) {
-  if (w.rank === null) return { text: "Out of the top 8", tone: "drop" as const };
+  if (w.rank === null) return { text: "Drops out of the top 8", tone: "drop" as const };
   if (w.rank > rank) return { text: `Falls to #${w.rank}`, tone: "drop" as const };
   if (w.rank < rank) return { text: `Rises to #${w.rank}`, tone: "rise" as const };
   return { text: `Stays #${rank}`, tone: "same" as const };
@@ -426,16 +473,19 @@ function LoveRows({ n, compact, baseDelay = 0 }: { n: DecidesResult["neighborhoo
       {rows.map((w, i) => {
         const l = look(w.query);
         const m = moveLabel(n.rank, w);
+        const tone = m.tone === "drop" ? "text-you-deep" : m.tone === "rise" ? "text-[color-mix(in_oklch,var(--them)_80%,var(--ink))]" : "text-ink-3";
         return (
-          <li key={w.query} className={`flex items-center gap-2.5 rounded-[11px] ${compact ? "py-0.5" : "px-1.5 py-1"} ${m.tone === "drop" && !compact ? "bg-[color-mix(in_oklch,var(--you)_6%,transparent)]" : ""}`}>
+          <li key={w.query} aria-label={`Without ${w.name || l.name}: ${m.text.toLowerCase()}`} className={`flex items-center gap-2.5 rounded-[11px] ${compact ? "py-0.5" : "px-1.5 py-1"} ${m.tone === "drop" && !compact ? "bg-[color-mix(in_oklch,var(--you)_6%,transparent)]" : ""}`}>
             <LoveFace name={w.name || l.name} image={l.image} size={compact ? 20 : 24} />
-            <span className={`min-w-0 flex-1 truncate font-[560] ${compact ? "text-[12.5px]" : "text-[13.5px]"}`}>{w.name || l.name}</span>
-            <Slope from={n.rank} to={w.rank} delay={baseDelay + i * 0.05} />
-            <span
-              className={`tnum w-[96px] shrink-0 text-right sm:w-[108px] ${compact ? "text-[12px]" : "text-[12.5px]"} font-[580] ${m.tone === "drop" ? "text-you-deep" : m.tone === "rise" ? "text-[color-mix(in_oklch,var(--them)_80%,var(--ink))]" : "text-ink-3"}`}
-            >
-              {m.text}
+            {/* each row is one love taken away on its own; the move sits under the name so neither is cut */}
+            <span className={`min-w-0 flex-1 ${compact ? "text-[12.5px]" : "text-[13.5px]"}`}>
+              <span className="block truncate font-[560]">
+                <span className="font-[450] text-ink-3">Without </span>
+                {w.name || l.name}
+              </span>
+              <span className={`tnum block text-[12px] font-[580] ${tone}`}>{m.text}</span>
             </span>
+            <Slope from={n.rank} to={w.rank} delay={baseDelay + i * 0.05} />
           </li>
         );
       })}
@@ -443,16 +493,9 @@ function LoveRows({ n, compact, baseDelay = 0 }: { n: DecidesResult["neighborhoo
   );
 }
 
-export function decidesStatement(r: DecidesResult) {
-  const top = r.neighborhoods[0];
-  if (!top || !top.without.length) return null;
-  if (r.robust) return { robust: true, text: `${top.name} stays first whichever single love you take away, so this pick does not rest on one taste.` };
-  const p = top.without.find((w) => w.query === r.pivotal) ?? top.without.find((w) => w.rank !== 1);
-  const name = p?.name ?? r.pivotal ?? "one love";
-  return { robust: false, text: `${name} decides the top spot. Without it, ${top.name} is no longer first.` };
-}
-
 export function DecidesCard({ result, compact = false, onPick }: { result: DecidesResult; compact?: boolean; onPick?: (id: string) => void }) {
+  const ex = useExplore();
+  const scoreOf = (id: string) => ex.hoods.data?.find((h) => h.id === id)?.score;
   const st = decidesStatement(result);
   const hoods = compact ? result.neighborhoods.slice(0, 1) : result.neighborhoods;
   return (
@@ -482,8 +525,11 @@ export function DecidesCard({ result, compact = false, onPick }: { result: Decid
                 className={`mb-2 flex w-full items-center gap-2.5 text-left ${onPick ? "group" : ""}`}
               >
                 <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${n.rank === 1 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{n.rank}</span>
-                <span className={`min-w-0 flex-1 truncate font-[630] tracking-[-0.015em] ${compact ? "text-[15px]" : "text-[17px]"} ${onPick ? "group-hover:underline" : ""}`}>{n.name}</span>
-                <span className="shrink-0 text-[12px] text-ink-3">without each love</span>
+                <span className="min-w-0 flex-1">
+                  <span className={`block truncate font-[630] tracking-[-0.015em] ${compact ? "text-[15px]" : "text-[17px]"} ${onPick ? "group-hover:underline" : ""}`}>{n.name}</span>
+                  {!compact && scoreOf(n.id) !== undefined && <MatchValue score={scoreOf(n.id)} size="sm" />}
+                </span>
+                <span className="shrink-0 text-[12px] text-ink-3">one love at a time</span>
               </button>
               <LoveRows n={n} compact={compact} baseDelay={0.15 + i * 0.1} />
             </motion.section>

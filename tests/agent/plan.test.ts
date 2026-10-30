@@ -29,7 +29,7 @@ describe("compact change plans", () => {
   it("performs one short JSON planning call with no graph ids supplied by the model", async () => {
     vi.mocked(chat).mockReturnValueOnce(Promise.resolve({ content: JSON.stringify(genrePlan), tool_calls: [] }));
     expect((await makePlan(input, {}, new AbortController().signal))?.entities).toHaveLength(3);
-    expect(vi.mocked(chat).mock.calls[0][0]).toMatchObject({ response_format: { type: "json_object" }, max_tokens: 650 });
+    expect(vi.mocked(chat).mock.calls[0][0]).toMatchObject({ response_format: { type: "json_object" }, max_tokens: 1100 });
   });
 
   it("normalizes the model's type alias through the existing patch schema", async () => {

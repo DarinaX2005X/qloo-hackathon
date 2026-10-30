@@ -57,7 +57,7 @@ export function AddressScreen() {
     void f.checkSpot(where);
   };
 
-  // a click on the map checks that exact point
+  // a click on the map checks that point
   const stateRef = useRef(ex.state);
   stateRef.current = ex.state;
   const checkRef = useRef(check);
@@ -86,7 +86,7 @@ export function AddressScreen() {
     <ScreenPanel label="Check an address" testId="address-screen">
       <ScreenTitle
         title="Check an address"
-        lead={<>Paste the address of a flat you are looking at. Homing tells you how well that exact spot fits your taste and what you would have within a short walk.</>}
+        lead={<>Paste the address of a flat you are looking at. Homing estimates how well the area around it fits your taste and what you would have within a short walk.</>}
       />
 
       <form
@@ -114,7 +114,7 @@ export function AddressScreen() {
         </Button>
       </form>
       <p className="mt-1.5 text-[12.5px] text-ink-3">
-        Any street address or place name in {here} works. Or click the exact spot on the map.
+        Any street address or place name in {here} works, or click a spot on the map.
       </p>
 
       {f.recentSpots.length > 0 && (
@@ -185,7 +185,7 @@ export function AddressScreen() {
         {hasLoves && !r && !f.spot.loading && !f.spot.error && (
           <div className="rounded-[18px] bg-paper-sunk/70 p-4 text-[14px] leading-relaxed text-ink-2">
             <p>
-              A district can fit you while the street you would live on does not. Homing reads your taste at the exact spot, ranks it against the rest of {here}, and lists the cafés, food, bars and culture that fit you within about a kilometre.
+              Homing reads your taste map at that point, ranks it against the rest of {here}, and lists the cafés, food, bars and culture that fit you within about a 12 minute walk. The taste map has about 1 km resolution, so the score describes the area around the flat, not the building itself.
             </p>
             {examples.length > 0 && (
               <>

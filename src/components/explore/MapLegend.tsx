@@ -35,7 +35,7 @@ export function MapLegend({ pair }: { pair: boolean }) {
           <X size={13} />
         </button>
       </div>
-      <p>Taller, darker columns: more people who love what you love spend time here.</p>
+      <p>Taller, darker columns: a stronger signal for what you love, adjusted for how busy the area is.</p>
       {pair ? (
         <div className="mt-2 flex items-center gap-3">
           <span className="flex items-center gap-1.5"><i className="h-3 w-3 rounded-[3px] bg-you" /> You</span>

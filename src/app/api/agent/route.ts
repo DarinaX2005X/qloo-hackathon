@@ -1,11 +1,14 @@
 import { AgentRequest, type AgentEvent } from "@/shared/contracts";
 import { asFailure, fail } from "@/server/agent/errors";
 import { runAgent, serializeEvent } from "@/server/agent/runner";
+import { enforceRateLimit } from "@/server/engine/rate-limit";
+import { errorResponse } from "@/server/engine/http";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request: Request): Promise<Response> {
+  try { enforceRateLimit(request); } catch (error) { return errorResponse(error); }
   const input = AgentRequest.safeParse(await request.json().catch(() => null));
   if (!input.success || !input.data.message.trim()) {
     const failure = fail("bad_input", "Provide a valid profile and a message of 1–1000 characters.", 400);

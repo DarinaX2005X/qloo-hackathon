@@ -10,6 +10,8 @@ import { HoodCompare } from "./HoodCompare";
 import { CityCompare } from "./CompareCities";
 import { Segmented, Skeleton } from "@/components/ui/primitives";
 import { cityName } from "@/components/ui/CityPicker";
+import { MatchExplainer } from "@/components/ui/Match";
+import { matchPhrase } from "@/lib/honest";
 import { useGoTo, useIsMobile } from "./nav";
 
 /** A styled listbox of the ranked neighborhoods. */
@@ -34,10 +36,11 @@ function HoodPicker({ value, options, onChange, label, disabledId }: { value: Ne
         aria-expanded={open}
         aria-label={`${label}: ${value.name}`}
         onClick={() => setOpen((v) => !v)}
-        className="flex h-11 w-full items-center gap-2 rounded-[12px] bg-paper-raised pl-2 pr-2.5 text-left shadow-[var(--shadow-rest)] ring-1 ring-line transition-shadow hover:shadow-[var(--shadow-raised)]"
+        className="flex min-h-11 w-full items-center gap-2 rounded-[12px] bg-paper-raised py-1.5 pl-2 pr-2 text-left sm:pr-2.5 shadow-[var(--shadow-rest)] ring-1 ring-line transition-shadow hover:shadow-[var(--shadow-raised)]"
       >
         <span className={`tnum grid h-7 w-7 shrink-0 place-items-center rounded-[8px] text-[13px] font-[650] ${value.rank === 1 ? "bg-you text-white" : "bg-paper-sunk text-ink-2"}`}>{value.rank}</span>
-        <span className="min-w-0 flex-1 truncate text-[15px] font-[600] tracking-[-0.01em]">{value.name}</span>
+        {/* a long name wraps to a second line instead of being cut ("Ville-M…") */}
+        <span className="line-clamp-2 min-w-0 flex-1 text-[15px] font-[600] leading-[1.2] tracking-[-0.01em]">{value.name}</span>
         <ChevronDown size={16} className={`shrink-0 text-ink-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       <AnimatePresence>
@@ -63,7 +66,7 @@ function HoodPicker({ value, options, onChange, label, disabledId }: { value: Ne
                 >
                   <span className="tnum w-6 shrink-0 text-center text-[12.5px] font-[620] text-ink-3">{n.rank}</span>
                   <span className="min-w-0 flex-1 truncate">{n.name}</span>
-                  <span className="tnum shrink-0 text-[13px] font-[600] text-ink-2">{Math.round(n.score * 100)}</span>
+                  <span className="tnum shrink-0 text-[12.5px] font-[580] text-ink-2">{matchPhrase(n.score)}</span>
                 </button>
               </li>
             ))}
@@ -105,14 +108,15 @@ function Neighborhoods() {
   };
   return (
     <div>
-      <div className="mb-3 flex items-center gap-2">
+      {/* on a phone the two pickers stack, full width, so names are not cut; side by side from sm up */}
+      <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1.5 sm:flex sm:gap-2">
         <HoodPicker label="First neighborhood" value={a} options={hoods} onChange={(id) => set(0, id)} disabledId={b.id} />
         <button
           onClick={() => ex.setCompare([b.id, a.id])}
           aria-label="Swap the two neighborhoods"
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] text-ink-2 transition-colors hover:bg-paper-sunk hover:text-ink"
+          className="row-span-2 grid h-9 w-9 shrink-0 place-items-center rounded-[10px] text-ink-2 transition-colors hover:bg-paper-sunk hover:text-ink"
         >
-          <ArrowLeftRight size={16} />
+          <ArrowLeftRight size={16} className="rotate-90 sm:rotate-0" />
         </button>
         <HoodPicker label="Second neighborhood" value={b} options={hoods} onChange={(id) => set(1, id)} disabledId={a.id} />
       </div>
@@ -125,6 +129,7 @@ function Neighborhoods() {
         }}
       />
       <p className="mt-2 text-[12.5px] text-ink-3">Click a name to open its places on the Map screen.</p>
+      <MatchExplainer className="mt-2" />
     </div>
   );
 }
@@ -142,7 +147,7 @@ export function CompareScreen() {
   const hoodsSection = (
     <section aria-label="Compare neighborhoods">
       <h2 className="text-[22px] font-[660] leading-tight tracking-[-0.02em]">Two neighborhoods side by side</h2>
-      <p className="mb-4 mt-1.5 text-[14px] leading-relaxed text-ink-2">How each one scores for your taste in {cityName(ex.state.city)}, which of your loves lift it, and who is around.</p>
+      <p className="mb-4 mt-1.5 text-[14px] leading-relaxed text-ink-2">Where each one ranks for your taste in {cityName(ex.state.city)}, which of your loves lift it, and how busy it is.</p>
       <Neighborhoods />
     </section>
   );

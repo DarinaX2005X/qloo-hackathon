@@ -85,7 +85,8 @@ describe("07 home composition", () => {
   it("builds the real field and ranking with place signals, bounded similarities and shared tags", async () => {
     const result = HomeResult.parse(await findHome({ state: state(), source: { city: "Source", neighborhood: "Old" }, blend: 0 }));
     expect(result.source.places).toHaveLength(8); expect(result.field.cells).toHaveLength(5);
-    expect(result.matches[0].similarity).toBeGreaterThan(0); expect(result.matches[0].similarity).toBeLessThan(100);
+    // Synthetic source and target have identical tag frequencies, so true similarity is exactly 100.
+    expect(result.matches[0].similarity).toBe(100);
     expect(result.matches[0].sharedTags).toContain("Cozy"); expect(result.matches[0].twins.length).toBeLessThanOrEqual(3);
     expect(client.mock.calls.some(([, p]) => p["filter.type"] === "urn:heatmap" && String(p["signal.interests.entities"]).split(",").length === 8)).toBe(true);
   });
@@ -164,7 +165,7 @@ describe("07 spot composition", () => {
     vi.mocked(geocode).mockResolvedValue({ name: "Street", street: "Street", label: "Street, City", query: "Street", center: [0, 0], streetLevel: true });
     const result = await checkSpot({ state: state(), query: "Street 12" });
     expect(result.label).toBe("Street, City");
-    expect(result.verdict).toMatch(/^Street \(the street, house number not found\) is better than/);
+    expect(result.verdict).toMatch(/^Street \(the street, house number not found\): better than/);
     expect(reverseGeocode).not.toHaveBeenCalled();
   });
   it("reverse-geocodes an unlabelled pin without moving its point", async () => {

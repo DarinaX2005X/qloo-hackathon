@@ -2,7 +2,7 @@ import { type ExploreState, type Neighborhood, type TasteField } from "@/shared/
 import { record, string, unit, type QlooRecord } from "@/server/qloo/client";
 import { buildField, loadLoveMaps, loveSeries, type LoveSeries } from "./field";
 import { matchedPlaceTags } from "./fingerprint";
-import { coordinates, focusRadius, haversine, mean, median, percentileRanks } from "./geo";
+import { coordinates, focusRadius, haversine, mean, median } from "./geo";
 import { getCityEvidence } from "./evidence";
 
 export { coordinates } from "./geo";
@@ -35,6 +35,30 @@ export function neighborhoodDrivers(series: LoveSeries[], cityCells: string[], a
   })).sort((a, b) => b.share - a.share);
 }
 
+/** Three neutral cell-equivalents regularize small areas; this is not a confidence interval. */
+export const NEUTRAL_CELL_PRIOR = 3;
+
+export function areaMatchScore(cells: TasteField["cells"], discovery: number, person: "you" | "them" = "you"): number {
+  const unique = [...new Map(cells.map(cell => [cell.h, cell])).values()];
+  // A prior cannot manufacture support when this person has no mapped signal in the area.
+  if (!unique.some(cell => (cell[person] ?? 0) > 0)) return 0;
+  const reliability = unique.length / (unique.length + NEUTRAL_CELL_PRIOR);
+  // cell[person] already includes weights, refinements and the crowd discount.
+  // Shrink its underlying percentile toward .5, then apply that SAME discount to the prior.
+  return mean(unique.map(cell => reliability * (cell[person] ?? 0)
+    + (1 - reliability) * .5 * (1 - .7 * discovery * cell.popularity)));
+}
+
+/** Both score and displayed lift are the same adjusted match metric, on affine scales. */
+export function orderNeighborhoods(areas: Neighborhood[]): Neighborhood[] {
+  const ordered = areas.map(area => ({ ...area, lift: 2 * area.score - 1, liftKind: "adjusted_match" as const }))
+    .sort((a, b) => b.score - a.score || (b.you + (b.them ?? 0)) - (a.you + (a.them ?? 0)) || a.name.localeCompare(b.name));
+  const allNegative = ordered.length > 0 && ordered.every(area => area.lift < 0);
+  return ordered.slice(0, 8).map((area, i) => ({ ...area, rank: i + 1, rankingNote: undefined,
+    ...(i === 0 && allNegative ? { rankingNote: "All scored neighborhoods have a negative adjusted match lift with these settings." } : {}),
+  }));
+}
+
 export async function rankNeighborhoods(state: ExploreState, field?: TasteField): Promise<Neighborhood[]> {
   const [taste, evidence, individual] = await Promise.all([
     field ?? buildField(state), getCityEvidence(state),
@@ -43,8 +67,6 @@ export async function rankNeighborhoods(state: ExploreState, field?: TasteField)
   const { yours, theirs, fingerprint } = evidence;
   const series = loveSeries(individual, new Set(taste.cells.map((cell) => cell.h)));
   const radius = focusRadius(taste.center, taste.cells);
-  const youById = new Map(yours.map((row) => [string(row.entity_id), unit(record(row.query).affinity)]));
-  const themById = new Map(theirs?.map((row) => [string(row.entity_id), unit(record(row.query).affinity)]) ?? []);
   const groups = new Map<string, { name: string; places: Map<string, QlooRecord> }>();
   for (const row of [...yours, ...(theirs ?? [])]) {
     const name = neighborhoodName(row);
@@ -71,17 +93,16 @@ export async function rankNeighborhoods(state: ExploreState, field?: TasteField)
   }
   const fingerprintTags = [...fingerprint.you, ...(fingerprint.them ?? [])];
   const result: Neighborhood[] = centers.filter((group) => group.cells.some((cell) => cell.you > 0 || (cell.them ?? 0) > 0)).map((group) => {
-    const you = 0.7 * mean(group.cells.map((cell) => cell.you).sort((a, b) => b - a).slice(0, 3)) + 0.3 * mean(group.places.map((row) => youById.get(string(row.entity_id)) ?? 0));
-    const them = state.companion ? 0.7 * mean(group.cells.map((cell) => cell.them ?? 0).sort((a, b) => b - a).slice(0, 3)) + 0.3 * mean(group.places.map((row) => themById.get(string(row.entity_id)) ?? 0)) : undefined;
+    // Equal-cell means with a neutral prior: more cells add evidence, never a count score.
+    const you = areaMatchScore(group.cells, state.discovery);
+    const them = state.companion ? areaMatchScore(group.cells, state.discovery, "them") : undefined;
     const drivers = neighborhoodDrivers(series, taste.cells.map((cell) => cell.h), group.cells.map((cell) => cell.h));
     const matchedTags = matchedPlaceTags(group.places, fingerprintTags);
     const popularity = mean(group.places.map((row) => unit(row.popularity)));
     return { id: group.id, name: group.name, center: group.center, score: them === undefined ? you : Math.min(you, them), you,
       ...(them === undefined ? {} : { them }), rank: 1, drivers, matchedTags, vibe: popularity > 0.85 ? "touristy" : popularity > 0.6 ? "mixed" : "local",
+      crowd: popularity > 0.85 ? "busy" : popularity > 0.6 ? "moderate" : "quiet",
       samplePlaces: [...new Set(group.places.map((row) => string(row.name)).filter((name): name is string => !!name))].slice(0, 3), cellIds: group.cells.map((cell) => cell.h) };
   });
-  const percentiles = percentileRanks(result.map((group) => group.score));
-  return result.map((group, i) => ({ ...group, score: 0.35 + 0.63 * percentiles[i] }))
-    .sort((a, b) => b.score - a.score || (b.you + (b.them ?? 0)) - (a.you + (a.them ?? 0)) || a.name.localeCompare(b.name))
-    .slice(0, 8).map((group, i) => ({ ...group, rank: i + 1 }));
+  return orderNeighborhoods(result);
 }

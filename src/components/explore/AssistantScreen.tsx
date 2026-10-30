@@ -2,16 +2,19 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, ArrowUp, Check, ChevronDown, ImagePlus, Map as MapIcon, MessagesSquare, RotateCcw, Square } from "lucide-react";
-import type { AgentCard, Neighborhood } from "@/shared/contracts";
-import { activeLoves } from "@/shared/contracts";
-import { useExplore, type ChatTurn } from "./store";
+import { ArrowRight, ArrowUp, CalendarDays, Check, ChevronDown, ImagePlus, Map as MapIcon, MessagesSquare, RotateCcw, Square } from "lucide-react";
+import type { AgentCard, Category, Itinerary, Neighborhood } from "@/shared/contracts";
+import { activeLoves, CATEGORIES } from "@/shared/contracts";
+import { useExplore, type ChatTurn, type PlanOptions } from "./store";
 import { api } from "./api";
 import { useGoTo, useIsMobile } from "./nav";
 import { Spinner } from "@/components/ui/primitives";
 import { cityName } from "@/components/ui/CityPicker";
 import { useFeatures } from "@/components/screens/features";
 import { DecidesCard, HomeCard, SpotCard } from "@/components/screens/cards";
+import { BelowNeutralNote, MatchValue } from "@/components/ui/Match";
+import { dayNoteLines } from "@/lib/explain";
+import { stopReasonLines } from "@/lib/honest";
 
 const MAX = 1000;
 const spring = { type: "spring", stiffness: 420, damping: 36 } as const;
@@ -34,6 +37,8 @@ function useSuggestions(): string[] {
     list = ["Mix in what I love as well", top ? `Why is ${top.name} first for me?` : null, address, "Plan three days"];
   else if (lastKinds.has("spot"))
     list = ["Which neighborhood fits me better than this?", "What's open late within a short walk?", "Plan three days"];
+  else if (lastKinds.has("plan"))
+    list = ["Start our days later, around 11", "No museums, please", address, top ? `Why is ${top.name} first?` : null];
   else if (lastKinds.has("decides"))
     list = ["Less touristy, I work from cafés", "I used to live in Kreuzberg, Berlin", "Plan three days"];
   else
@@ -114,12 +119,94 @@ function RankingCard({ hoods }: { hoods: Neighborhood[] }) {
                 <span className="block truncate text-[15px] font-[600] tracking-[-0.01em] text-ink">{n.name}</span>
                 {n.matchedTags.length > 0 && <span className="block truncate text-[12px] text-ink-3">{n.matchedTags.slice(0, 3).join(", ")}</span>}
               </span>
-              <span className="tnum shrink-0 text-[15px] font-[640] text-ink">{Math.round(n.score * 100)}</span>
+              <MatchValue score={n.score} />
               <ArrowRight size={14} className="shrink-0 text-ink-3 transition-transform group-hover:translate-x-0.5 group-hover:text-ink" />
             </button>
           </li>
         ))}
       </ol>
+      <BelowNeutralNote show={hoods.some((n) => !!n.rankingNote)} className="mx-1 mb-1 mt-1" />
+    </div>
+  );
+}
+
+const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+/** The options a plan card was built with. The contract's card carries only the itinerary today; when the
+ *  backend adds the PlanRequest fields (as `options`, or flat on the card) they are picked up here. */
+type PlanCardExtras = { options?: PlanOptions } & PlanOptions;
+function planCardOptions(card: Extract<AgentCard, { kind: "plan" }>): PlanOptions {
+  const extra = card as typeof card & PlanCardExtras;
+  const src = extra.options ?? extra;
+  const list = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+  return {
+    excludeCategories: list<Category>(src.excludeCategories).filter((c) => (CATEGORIES as readonly string[]).includes(c)),
+    excludeTags: list<string>(src.excludeTags).filter((t) => typeof t === "string" && t.trim()),
+    include: list<string>(src.include ?? (src as { mustInclude?: unknown }).mustInclude).filter((t) => typeof t === "string" && t.trim()),
+  };
+}
+
+/** The trip the assistant built: day by day, with what it had to adapt and why, and a way into the Trip screen. */
+function PlanCard({ itinerary, options }: { itinerary: Itinerary; options: PlanOptions }) {
+  const ex = useExplore();
+  const goTo = useGoTo();
+  const city = cityName(ex.state.city);
+  const days = itinerary.days;
+  const stops = days.reduce((n, d) => n + d.stops.length, 0);
+  return (
+    <div data-testid="plan-card">
+      <div className="rounded-[18px] bg-paper-raised p-3.5 ring-1 ring-line">
+        <p className="text-[12.5px] font-[560] text-ink-3">
+          {days.length === 1 ? "One day" : `${days.length} days`} in {city}, {stops} {stops === 1 ? "stop" : "stops"}
+        </p>
+        <ol className="mt-2 space-y-3">
+          {days.map((d, i) => {
+            const adapted = stopReasonLines(d.stops.flatMap((s) => s.reasonCodes ?? []));
+            const notes = dayNoteLines(d, city);
+            return (
+              <li key={i} className={i ? "border-t border-line pt-3" : ""}>
+                <p className="flex items-baseline justify-between gap-2">
+                  <span className="min-w-0 text-[15px] font-[630] tracking-[-0.01em] text-ink">
+                    Day {i + 1}
+                    {d.weekday ? `, ${cap(d.weekday)}` : ""}
+                    <span className="font-[450] text-ink-2"> in {d.neighborhood}</span>
+                  </span>
+                  <span className="tnum shrink-0 text-[12px] text-ink-3">{d.stops.length ? `${d.stops.length} ${d.stops.length === 1 ? "stop" : "stops"}` : "no stops"}</span>
+                </p>
+                {d.stops.length > 0 && (
+                  <ul className="mt-1.5 space-y-0.5">
+                    {d.stops.slice(0, 4).map((s) => (
+                      <li key={`${s.place.id}-${s.time}`} className="flex gap-2 text-[13px] leading-snug">
+                        <span className="tnum w-10 shrink-0 font-[600] text-ink-2">{s.time}</span>
+                        <span className="min-w-0 truncate text-ink">{s.place.name}</span>
+                      </li>
+                    ))}
+                    {d.stops.length > 4 && <li className="pl-12 text-[12px] text-ink-3">and {d.stops.length - 4} more</li>}
+                  </ul>
+                )}
+                {(notes.length > 0 || adapted.length > 0) && (
+                  <ul className="mt-1.5 space-y-0.5 text-[12px] leading-snug text-ink-2">
+                    {notes.map((l) => (
+                      <li key={l}>{l}</li>
+                    ))}
+                    {adapted.length > 0 && <li className="text-ink-3">Adapted stops: {adapted.map((a) => a.toLowerCase()).join("; ")}.</li>}
+                  </ul>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+        <p className="mt-2.5 text-[11.5px] text-ink-3">Times include approximate walking between stops.</p>
+      </div>
+      <button
+        onClick={() => {
+          ex.showPlan(itinerary, options);
+          goTo("/explore/trip");
+        }}
+        className="mt-1.5 flex items-center gap-1.5 rounded-[9px] px-2 py-1 text-[13px] font-[600] text-you-deep transition-colors hover:bg-you-soft/60"
+      >
+        <CalendarDays size={14} /> Open trip <ArrowRight size={13} />
+      </button>
     </div>
   );
 }
@@ -136,6 +223,7 @@ function Card({ card }: { card: AgentCard }) {
   const features = useFeatures();
   const goTo = useGoTo();
   if (card.kind === "ranking") return <RankingCard hoods={card.neighborhoods} />;
+  if (card.kind === "plan") return <PlanCard itinerary={card.itinerary} options={planCardOptions(card)} />;
   if (card.kind === "home")
     return (
       <div>
@@ -160,6 +248,7 @@ function Card({ card }: { card: AgentCard }) {
         />
       </div>
     );
+  if (card.kind !== "decides") return null;
   return (
     <div>
       <DecidesCard result={card.result} compact />
@@ -186,7 +275,8 @@ function Turn({ turn, retry }: { turn: ChatTurn; retry?: () => void }) {
       </motion.p>
     );
   // cards come in before the words; show the words first so the card reads as the evidence
-  const order: AgentCard["kind"][] = ["ranking", "home", "spot", "decides"];
+  // listed last-shown first: a plan, the end of a chain, sits at the bottom
+  const order: AgentCard["kind"][] = ["plan", "ranking", "home", "spot", "decides"];
   const cards = [...turn.cards].sort((a, b) => order.indexOf(b.kind) - order.indexOf(a.kind));
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-2.5" data-testid="assistant-turn">
@@ -392,7 +482,7 @@ function Conversation({ onShowMap }: { onShowMap?: () => void }) {
           </span>
           <div className="min-w-0">
             <h2 className="truncate text-[18px] font-[650] leading-tight tracking-[-0.02em]">Assistant</h2>
-            <p className="truncate text-[12.5px] text-ink-3">Changes show on the map as it works</p>
+            <p className="text-[12.5px] leading-snug text-ink-3">Changes show on the map as it works</p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">

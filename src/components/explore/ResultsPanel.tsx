@@ -9,12 +9,13 @@ import { useExplore } from "./store";
 import { Button, Segmented, Skeleton, Spinner } from "@/components/ui/primitives";
 import { cityName } from "@/components/ui/CityPicker";
 import { LOVE_INKS } from "./inks";
+import { BelowNeutralNote, MatchExplainer, MatchValue } from "@/components/ui/Match";
+import { CROWD_TOOLTIP, crowdLine, crowdOf } from "@/lib/honest";
 import { PlaceDrawer } from "./PlaceDrawer";
 import { useGoTo, useScreenHref } from "./nav";
 
 export { LOVE_INKS };
 
-const VIBE: Record<Neighborhood["vibe"], string> = { local: "Mostly locals", mixed: "Locals and visitors", touristy: "Busy with visitors" };
 const CAT: Record<Category, string> = { coffee: "Coffee", food: "Food", drinks: "Drinks", culture: "Culture", stay: "Stay" };
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const PRICE = ["", "$", "$$", "$$$", "$$$$"];
@@ -109,6 +110,7 @@ function Ranking() {
       )}
       {cmp.length === 1 && <p className="mb-2 text-[12.5px] text-ink-3">Pick one more neighborhood to compare with {cmp[0].name}.</p>}
       {!pair && <Legend order={order} />}
+      <MatchExplainer className="mb-2.5" />
       <ol className={`space-y-2 transition-opacity ${loading ? "opacity-60" : ""}`}>
         {data.map((n) => {
           const inCmp = ex.compare.includes(n.id);
@@ -124,7 +126,7 @@ function Ranking() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="truncate text-[17px] font-[620] tracking-[-0.015em] text-ink">{n.name}</span>
-                      <span className="tnum shrink-0 text-[17px] font-[640] text-ink">{Math.round(n.score * 100)}</span>
+                      <MatchValue score={n.score} />
                     </div>
                     {!pair && <DriverBar n={n} order={order} />}
                     {pair && n.them !== undefined && (
@@ -143,7 +145,9 @@ function Ranking() {
                       </div>
                     )}
                     <p className="mt-1.5 text-[13.5px] leading-snug text-ink-2">{why(n)}</p>
-                    <p className="mt-1.5 pr-24 text-[12px] text-ink-3">{VIBE[n.vibe]}</p>
+                    <p className="mt-1.5 pr-24 text-[12px] text-ink-3" title={CROWD_TOOLTIP}>
+                      {crowdLine(crowdOf(n))}
+                    </p>
                   </div>
                 </div>
               </button>
@@ -158,6 +162,7 @@ function Ranking() {
           );
         })}
       </ol>
+      <BelowNeutralNote show={data.some((n) => !!n.rankingNote)} className="mt-3" />
     </LayoutGroup>
   );
 }
@@ -238,10 +243,10 @@ function Detail({ n }: { n: Neighborhood }) {
         <div>
           <h3 className="text-[28px] font-[680] leading-none tracking-[-0.03em]">{n.name}</h3>
           <p className="mt-1.5 text-[13.5px] text-ink-2">
-            Ranked {n.rank} of {ex.hoods.data?.length ?? n.rank} for your taste. {VIBE[n.vibe]}.
+            Ranked {n.rank} of {ex.hoods.data?.length ?? n.rank} for your taste. <span title={CROWD_TOOLTIP}>{crowdLine(crowdOf(n))}.</span>
           </p>
         </div>
-        <span className="tnum text-[34px] font-[680] leading-none tracking-[-0.03em] text-you">{Math.round(n.score * 100)}</span>
+        <MatchValue score={n.score} size="lg" />
       </div>
       <PlanEntry />
       <div className="mb-3 mt-4">

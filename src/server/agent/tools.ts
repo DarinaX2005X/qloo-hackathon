@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Category, Domain, EntityRef, ExploreState, LIMITS, Neighborhood, ResolvedLove, StatePatch, TagRef, type AgentCard } from "@/shared/contracts";
+import { Category, Domain, EntityRef, ExploreState, LIMITS, Neighborhood, ResolvedLove, StatePatch, TagRef, type AgentCard, type HomeResult } from "@/shared/contracts";
 import { applyPatches } from "@/shared/patches";
 import { searchEntities, searchPlaceTags } from "@/server/qloo";
 import { rankNeighborhoods } from "@/server/engine";
@@ -9,7 +9,8 @@ import { cardReply, neighborhoodReply, placesReply, rankingChanged } from "./fin
 import { findHome } from "@/server/engine/home";
 import { checkSpot } from "@/server/engine/spot";
 import { whatDecides } from "@/server/engine/decides";
-import { placesNear } from "@/server/engine/places";
+import { placesNear, searchTastePlaces } from "@/server/engine/places";
+import { solvePlan } from "@/server/engine/plan";
 
 // filler words, and kinds of place the plan already covers by category (cafes, bars), so the tags carry the rest
 const STOP = new Set(["the", "and", "with", "near", "for", "from", "that", "this", "some", "place", "places", "spot", "spots", "find", "want", "like", "good", "nice", "lots", "more", "less", "very", "really",
@@ -20,6 +21,11 @@ export function placeWords(text: string): string[] {
   return [...new Set(text.toLowerCase().split(/[^\p{L}]+/u).filter((word) => word.length >= 3 && !STOP.has(word)))].slice(0, 4);
 }
 
+/** Preserve an explicit constraint even if the model omits it from a tool call. */
+export function explicitlyAvoidsMuseums(message: string): boolean {
+  return /\b(?:no|without|avoid|skip|exclude)\s+(?:(?:any|all|the|art)\s+)*museums?\b|\b(?:i|we)\s+(?:hate|dislike)\s+(?:(?:visiting|art|the)\s+)*museums?\b|\b(?:don['’]t|do not)\s+(?:want|like)\s+(?:(?:any|to visit|visiting|art)\s+)*museums?\b/i.test(message);
+}
+
 export const ToolArguments = {
   search_entities: z.strictObject({ name: z.string().trim().min(1).max(120), domain: Domain.optional(), reference_for: z.string().trim().min(1).max(120).optional() }),
   search_place_tags: z.strictObject({ text: z.string().trim().min(1).max(120) }),
@@ -27,9 +33,14 @@ export const ToolArguments = {
   get_ranking: z.strictObject({}),
   explain_neighborhood: z.strictObject({ id: z.string().min(1).max(200) }),
   find_home: z.strictObject({ city: z.string().trim().min(1).max(80), neighborhood: z.string().trim().min(1).max(80) }),
+  select_home_match: z.strictObject({ index: z.number().int().min(0).max(2).default(0) }),
   check_address: z.strictObject({ query: z.string().trim().min(2).max(160) }),
   what_decides: z.strictObject({}),
-  get_places: z.strictObject({ neighborhood: z.string().min(1).max(200).optional(), categories: z.array(Category).min(1).max(5).optional() }),
+  get_places: z.strictObject({ neighborhood: z.string().min(1).max(200).optional(), categories: z.array(Category).min(1).max(5).optional(), intent: z.enum(["dance", "concert", "bar"]).optional() }),
+  plan_trip: z.strictObject({ days: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
+    pace: z.enum(["relaxed", "balanced", "packed"]).optional(), startHour: z.number().int().min(6).max(12).optional(),
+    neighborhood: z.string().max(200).optional(), excludeCategories: z.array(Category).max(5).optional(),
+    excludeTags: z.array(z.string().min(1).max(120)).max(20).optional(), mustInclude: z.array(z.string().min(1).max(120)).max(12).optional() }),
 };
 
 export const AGENT_TOOLS: ChatTool[] = [
@@ -39,9 +50,11 @@ export const AGENT_TOOLS: ChatTool[] = [
   { name: "get_ranking", description: "Build the taste field and rank up to eight neighborhoods using the latest state. Call after changes when a recommendation is needed." },
   { name: "explain_neighborhood", description: "Return evidence for a neighborhood from the current ranking; id can be a returned id or the name the user mentioned." },
   { name: "find_home", description: "Find areas in the current city like an old neighborhood. city is the source city, neighborhood is the old area. Infer a missing source city only for a famous unambiguous neighborhood; otherwise ask. Does not change the profile." },
+  { name: "select_home_match", description: "Select a returned home match for subsequent address/plan steps. index defaults to zero, the top match. Call only after find_home when the user asks to use the match." },
   { name: "check_address", description: "Score an address or flat in the current city and find places within walking distance. query is the address. Does not change the profile." },
   { name: "what_decides", description: "Measure robustness by removing each active love and reranking. Use for why an area is first, which love matters most, or how sure the ranking is." },
-  { name: "get_places", description: "Read real places for dinner, coffee, drinks or culture. Use the requested neighborhood name/id, or omit to use the selected/top neighborhood. Does not change state." },
+  { name: "get_places", description: "Read taste-aware places. For dancing use intent:dance, concerts intent:concert, a bar like my taste intent:bar. Searches the city with the user's loves and venue/ambience tags; excludes hotels for nightlife. Otherwise use categories and optional neighborhood." },
+  { name: "plan_trip", description: "Build an actual itinerary card, not just settings. Optional days 1..3, pace, startHour, neighborhood; excludeCategories for broad categories, excludeTags for specific types. No museums or I hate museums -> excludeTags:[museum], which removes museum/gallery venues but keeps bookshops, cinemas and music venues; do not exclude all culture. mustInclude contains place names or resolved IDs. Uses selected home match after select_home_match. Reports automatic recovery, empty days and constraints it could not satisfy." },
 ].map(({ name, description }) => ({
   type: "function", function: { name, description, parameters: z.toJSONSchema(ToolArguments[name as keyof typeof ToolArguments]) },
 }));
@@ -55,11 +68,13 @@ export type ToolContext = {
   references: Map<string, string>;
   signal: AbortSignal;
   answers: string[];
+  home?: HomeResult;
+  request?: string;
 };
 export type ToolResult = { summary: string; value: unknown; ops?: StatePatch[]; card?: AgentCard };
 
-export function createToolContext(state: ExploreState, signal: AbortSignal): ToolContext {
-  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, addedRefinements: new Set(), references: new Map(), signal, answers: [] };
+export function createToolContext(state: ExploreState, signal: AbortSignal, request?: string): ToolContext {
+  const context: ToolContext = { state: ExploreState.parse(state), entities: new Map(), tags: new Map(), ranking: null, addedRefinements: new Set(), references: new Map(), signal, answers: [], request };
   for (const love of [...state.loves, ...(state.companion?.loves ?? [])]) {
     for (const entity of [...love.candidates, ...(love.chosen ? [love.chosen] : [])]) context.entities.set(entityKey(entity), entity);
   }
@@ -198,8 +213,16 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       const source = ToolArguments.find_home.parse(input);
       const result = await withSignal(findHome({ state: context.state, source, blend: 0 }), context.signal);
       const card: AgentCard = { kind: "home", result };
+      context.home = result;
       context.answers.push(cardReply(card));
       return { summary: `Compared ${source.neighborhood}, ${source.city} with ${context.state.city}`, value: result, card };
+    }
+    case "select_home_match": {
+      const { index } = ToolArguments.select_home_match.parse(input);
+      const match = context.home?.neighborhoods[index];
+      if (!match) throw fail("not_found", "Find a home match before selecting it.", 404);
+      context.state = { ...context.state, neighborhood: match.id };
+      return { summary: `Selected ${match.name} from the home matches`, value: { neighborhood: match }, ops: [{ op: "select_neighborhood", id: match.id }] };
     }
     case "check_address": {
       const { query } = ToolArguments.check_address.parse(input);
@@ -216,14 +239,47 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       return { summary: "Checked the ranking without each love", value: result, card };
     }
     case "get_places": {
-      const { neighborhood: query, categories } = ToolArguments.get_places.parse(input);
+      const { neighborhood: query, categories, intent } = ToolArguments.get_places.parse(input);
       const ranking = await getRanking(context);
       const neighborhood = query ? ranking.find((n) => n.id === query || normalizeArea(n.name) === normalizeArea(query))
         : ranking.find((n) => n.id === context.state.neighborhood) ?? ranking[0];
       if (!neighborhood) throw fail("not_found", "That neighborhood is not in the current ranking.", 404);
-      const places = await withSignal(placesNear(context.state, neighborhood, categories ?? ["food"]), context.signal);
-      context.answers.push(placesReply(neighborhood, places));
+      const places = await withSignal(intent ? searchTastePlaces(context.state, intent, query ? neighborhood : undefined) : placesNear(context.state, neighborhood, categories ?? ["food"]), context.signal);
+      context.answers.push(placesReply(intent && !query ? { ...neighborhood, name: context.state.city } : neighborhood, places));
       return { summary: `Found ${places.length} places in ${neighborhood.name}`, value: { neighborhood, places } };
+    }
+    case "plan_trip": {
+      const args = ToolArguments.plan_trip.parse(input);
+      if (explicitlyAvoidsMuseums(context.request ?? "")) {
+        args.excludeTags = [...new Set([...(args.excludeTags ?? []), "museum"])];
+        // A model must not turn the narrow museum constraint into a blanket culture ban.
+        if (!/\b(?:no|without|avoid|skip|exclude|hate|dislike)\s+(?:all\s+)?cultur(?:e|al)\b/i.test(context.request ?? ""))
+          args.excludeCategories = args.excludeCategories?.filter(category => category !== "culture");
+      }
+      const state = { ...context.state, ...(args.days ? { days: args.days } : {}), ...(args.pace ? { pace: args.pace } : {}), ...(args.startHour ? { startHour: args.startHour } : {}) };
+      const ranked = await getRanking(context);
+      const choices = [...(context.home?.neighborhoods ?? []), ...ranked];
+      const selected = args.neighborhood ? choices.find(n => n.id === args.neighborhood || normalizeArea(n.name) === normalizeArea(args.neighborhood!))
+        : choices.find(n => n.id === state.neighborhood) ?? ranked[0];
+      if (!selected) throw fail("not_found", "No ranked neighborhood is available for a plan.", 404);
+      const include: string[] = [], unresolved: string[] = [];
+      for (const name of args.mustInclude ?? []) {
+        const known = [...context.entities.values()].find(e => e.domain === "place" && (e.id === name || normalizeArea(e.name) === normalizeArea(name)));
+        const found = known ?? (await withSignal(searchEntities(name, "place"), context.signal)).find(e => normalizeArea(e.name) === normalizeArea(name));
+        if (found) include.push(found.id); else unresolved.push(name);
+      }
+      const options = { include, excludeCategories: args.excludeCategories, excludeTags: args.excludeTags };
+      const itinerary = await withSignal(solvePlan(state, [selected.id, ...ranked.filter(n => n.id !== selected.id).slice(0, state.days - 1).map(n => n.id)],
+        options, context.home?.neighborhoods), context.signal);
+      if (unresolved.length && itinerary.days[0]) itinerary.days[0].note = `${itinerary.days[0].note ?? ""} Could not resolve requested places: ${unresolved.join(", ")}.`.trim();
+      const card: AgentCard = { kind: "plan", itinerary, options: { ...options, days: state.days, pace: state.pace, startHour: state.startHour } };
+      context.answers.push(cardReply(card));
+      const ops: StatePatch[] = [];
+      if (state.days !== context.state.days) ops.push({ op: "set_days", days: state.days });
+      if (state.pace !== context.state.pace) ops.push({ op: "set_pace", pace: state.pace });
+      if (state.startHour !== context.state.startHour) ops.push({ op: "set_start", hour: state.startHour });
+      context.state = state;
+      return { summary: `Built ${itinerary.days.length} days; ${itinerary.days.filter(day => day.note || !day.stops.length).length} need a recovery note`, value: itinerary, card, ...(ops.length ? { ops } : {}) };
     }
     default: throw fail("bad_input", "Unknown assistant tool.", 400);
   }

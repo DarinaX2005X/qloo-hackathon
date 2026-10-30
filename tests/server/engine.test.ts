@@ -140,16 +140,16 @@ describe("taste field", () => {
     });
     const input = state({ loves: [love("artist"), love("tv", "tv_show", 0.5), love("game", "video_game")], discovery: 0 });
     const result = TasteField.parse(await buildField(input));
-    expect(result.cells[0].you).toBe(1);
-    expect(result.cells[1].you).toBeCloseTo(1 / 3);
-    expect(result.cells[0].drivers.artist).toBeCloseTo(6 / 7);
-    expect(result.cells[0].drivers.tv_show).toBeCloseTo(1 / 7);
+    expect(result.cells[0].you).toBe(.25);
+    expect(result.cells[1].you).toBe(.75);
+    expect(result.cells[0].drivers.artist).toBeCloseTo(2 / 3);
+    expect(result.cells[0].drivers.tv_show).toBeCloseTo(1 / 3);
     expect(result.signalsWithoutGeo).toEqual(["game"]);
     expect(result.bbox).toEqual([0, 0, 0.01, 0]);
     expect(result.sparse).toBe(true);
     const local = await buildField({ ...input, discovery: 1 });
-    expect(local.cells[0].you).toBeCloseTo(0.9);
-    expect(local.cells[1].you).toBe(1);
+    expect(local.cells[0].you).toBeCloseTo(.075);
+    expect(local.cells[1].you).toBe(.75);
     expect(get.mock.calls.some(([, params]) => params["signal.interests.entities"] === "artist,game,tv")).toBe(true);
   });
 
@@ -162,17 +162,17 @@ describe("taste field", () => {
     for (const cell of result.cells) expect(cell.both).toBe(Math.min(cell.you, cell.them!));
     expect(result.cells.find((cell) => cell.h === "bbbbbb")?.them).toBe(0);
     expect(result.cells.find((cell) => cell.h === "cccccc")?.you).toBe(0);
-    expect(result.cells[0].you).toBeCloseTo((0.65 * 0.25 + 0.35 * 0.5) / (0.65 * 0.75));
+    expect(result.cells[0].you).toBeCloseTo(0.65 * 0.25 + 0.35 * 0.5);
   });
 
   it("supports individual affinity without domain fields and rejects empty maps", async () => {
     get.mockImplementation(async (_path, params) => params["filter.type"] === "urn:entity:place" ? centerResponse : { results: { heatmap: [rawCell("aaaaaa", 0.8)] } });
-    expect((await buildField(state())).cells[0]).toMatchObject({ you: 1, drivers: { artist: 1 } });
+    expect((await buildField(state())).cells[0]).toMatchObject({ you: .5, lift: 0, drivers: { artist: 1 } });
     get.mockImplementation(async (_path, params) => params["filter.type"] === "urn:entity:place" ? centerResponse : { results: { heatmap: [] } });
     await expect(buildField(state())).rejects.toMatchObject({ error: { code: "not_found" } });
   });
 
-  it("locally ranks the combined signal while deriving explanations from individual maps", async () => {
+  it("uses individual signals even when a joint heatmap would reverse the ranking", async () => {
     get.mockImplementation(async (_path, params) => {
       if (params["filter.type"] === "urn:entity:place") return centerResponse;
       return { results: { heatmap: params["signal.interests.entities"] === "first,second"
@@ -180,8 +180,8 @@ describe("taste field", () => {
         : [rawCell("aaaaaa", 1), rawCell("bbbbbb", 0.1)] } };
     });
     const field = await buildField(state({ loves: [love("first"), love("second")], discovery: 0 }));
-    expect(field.cells[0].you).toBeCloseTo(1 / 3);
-    expect(field.cells[1].you).toBe(1);
+    expect(field.cells[0].you).toBe(.75);
+    expect(field.cells[1].you).toBe(.25);
     expect(field.cells[0].drivers).toEqual({ artist: 1 });
   });
 
@@ -203,11 +203,12 @@ describe("neighborhoods and places", () => {
     });
   });
 
-  it("uses median centers and raw scores to rank, then displays neighborhood percentiles", async () => {
+  it("uses median centers, coverage shrinkage and a display metric consistent with ordering", async () => {
     const ranked = await rankNeighborhoods(state({ discovery: 0 }));
     expect(ranked.map((n) => n.name)).toEqual(["Center", "Far"]);
-    expect(ranked[0]).toMatchObject({ center: [0.001, 0], you: 0.94, score: 0.8225, rank: 1, matchedTags: ["Cozy"], vibe: "local", cellIds: ["aaaaaa"], drivers: [{ domain: "artist", share: 1, love: "artist" }] });
-    expect(ranked[1].score).toBeCloseTo(0.5075);
+    expect(ranked[0]).toMatchObject({ center: [0.001, 0], you: .5625, score: .5625, lift: .125, liftKind: "adjusted_match", rank: 1, matchedTags: ["Cozy"], vibe: "local", crowd: "quiet", cellIds: ["aaaaaa"], drivers: [{ domain: "artist", share: 1, love: "artist" }] });
+    expect(ranked[1].score).toBe(.4375);
+    expect(ranked[1].lift).toBe(-.125);
     expect(get.mock.calls.filter(([, params]) => params.page)).toHaveLength(3);
   });
 
@@ -235,7 +236,7 @@ describe("neighborhoods and places", () => {
     ] };
     const result = await rankNeighborhoods(state({ loves: [love("first"), love("second")], companion: { loves: [love("other")] } }), field);
     expect(result.map((area) => area.name)).toEqual(["B", "A"]);
-    expect(result[0].score).toBeCloseTo(0.665);
+    expect(result[0].score).toBe(.5);
     expect(result[1].score).toBe(result[0].score);
     expect(result[0].drivers).toEqual([{ domain: "artist", love: "second", share: 1 }]);
     expect(result[1].drivers[0].love).toBe("first");
@@ -259,7 +260,7 @@ describe("neighborhoods and places", () => {
       { id: "urn:tag:ambience:qloo:intimate", name: "Intimate" }, { id: "urn:tag:decor:qloo:intimate", name: "INTIMATE" },
       { id: "urn:tag:inclusivity:place:women_owned", name: "Women owned" },
     ], properties: { keywords: [{ name: "Parking", count: 99 }, { name: "Intimate", count: 50 }, { name: "Coffee", count: 10 }, { name: "Garden", count: 9 }, { name: "Cakes", count: 8 }] } };
-    expect(placeFromRow(row, "coffee", [{ id: "urn:tag:decor:qloo:intimate", name: "Intimate", kind: "decor" }])?.why).toEqual(["Intimate", "Coffee", "Garden"]);
+    expect(placeFromRow(row, "coffee", [{ id: "urn:tag:decor:qloo:intimate", name: "Intimate", kind: "decor" }])?.why).toEqual(["Intimate", "Garden", "Cakes"]);
   });
 
   it("normalizes hours and rejects misleading categories or permanently closed places", () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { UserPlus, X } from "lucide-react";
 import type { ResolvedLove, TagRef } from "@/shared/contracts";
@@ -11,10 +11,12 @@ import { Button } from "@/components/ui/primitives";
 import { AskBar } from "./AskBar";
 import { TripControls } from "./TripControls";
 import { RecentMaps } from "./RecentMaps";
+import { domainOf, namesText, nameOf, type LandingName } from "@/components/landing/scenes";
+import { resolveNames } from "@/components/landing/useLiveField";
 
-export const PRESETS: { label: string; city: string; loves: string[] }[] = [
+export const PRESETS: { label: string; city: string; loves: LandingName[] }[] = [
   { label: "A rainy-day reader", city: "Lisbon", loves: ["Haruki Murakami", "Radiohead", "Fleabag", "Wes Anderson"] },
-  { label: "A club kid", city: "Berlin", loves: ["Charli xcx", "Peggy Gou", "Euphoria", "Aphex Twin"] },
+  { label: "A club kid", city: "Berlin", loves: ["Charli xcx", { name: "Peggy Gou", domain: "artist" }, { name: "Euphoria", domain: "tv_show" }, "Aphex Twin"] },
   { label: "Food first", city: "Mexico City", loves: ["The Bear", "Anthony Bourdain", "Chef's Table", "Bon Appétit"] },
 ];
 
@@ -117,14 +119,32 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
 
   const empty = !ex.state.loves.length && !Object.keys(ex.pending).length;
 
+  // a new chip (an unknown taste with its note, a long name) pushes the input down; while the person is
+  // typing, keep the input in view above the Ask bar instead of leaving it half under it
+  const scroller = useRef<HTMLDivElement>(null);
+  const inputBox = useRef<HTMLDivElement>(null);
+  const pendingKey = Object.keys(ex.pending).join("|");
+  useEffect(() => {
+    const box = inputBox.current, sc = scroller.current;
+    if (!box || !sc || !box.contains(document.activeElement)) return;
+    const keep = () => {
+      const gap = box.getBoundingClientRect().bottom + 16 - sc.getBoundingClientRect().bottom;
+      if (gap > 0) sc.scrollBy({ top: gap, behavior: "smooth" });
+    };
+    // once now, and again after the chip has finished animating in
+    const raf = requestAnimationFrame(keep);
+    const later = setTimeout(keep, 420);
+    return () => (cancelAnimationFrame(raf), clearTimeout(later));
+  }, [ex.state.loves, pendingKey]);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="hm-scroll min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 pb-6 pt-5">
+      <div ref={scroller} className="hm-scroll min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 pb-6 pt-5">
         <section>
           <h2 className="mb-1 text-[22px] font-[650] leading-tight tracking-[-0.02em]">What you love</h2>
           {!compact && <p className="mb-3 text-[14px] leading-snug text-ink-2">Artists, films, shows, books, brands or places. Mix them, that&apos;s the point.</p>}
           <Chips who="you" />
-          <div className={ex.state.loves.length ? "mt-2" : ""}>
+          <div ref={inputBox} className={ex.state.loves.length ? "mt-2" : ""}>
             <LoveInput
               count={ex.state.loves.length}
               onAdd={(q) => ex.addLove(q, "you")}
@@ -144,14 +164,17 @@ export function TastePanel({ compact = false }: { compact?: boolean }) {
                     key={p.label}
                     onClick={() => {
                       ex.patch([{ op: "set_city", city: p.city }]);
-                      p.loves.forEach((q) => ex.addLove(q, "you"));
+                      // a name with a domain hint ("Euphoria" the show) is resolved within that domain
+                      p.loves.forEach((q) =>
+                        domainOf(q) ? void resolveNames([q]).then((r) => ex.addResolved(r.filter((l) => l.chosen), "you")) : ex.addLove(nameOf(q), "you"),
+                      );
                     }}
                     className="group flex items-center justify-between rounded-[12px] bg-paper-raised px-3.5 py-2.5 text-left ring-1 ring-line transition-[transform,box-shadow] hover:-translate-y-px hover:shadow-[var(--shadow-raised)] active:scale-[0.99]"
                   >
                     <span>
                       <span className="block text-[14.5px] font-[580] text-ink">{p.label}</span>
                       <span className="block text-[12.5px] text-ink-3">
-                        {p.loves.slice(0, 3).join(", ")} in {p.city}
+                        {namesText(p.loves.slice(0, 3))} in {p.city}
                       </span>
                     </span>
                   </button>

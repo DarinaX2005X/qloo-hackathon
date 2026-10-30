@@ -11,7 +11,7 @@ export type GenreReference = { taste: string; names: string[] };
 export function neighborhoodReply(neighborhood: Neighborhood): string {
   const reasons = neighborhood.matchedTags.length ? ` Its places share ${neighborhood.matchedTags.slice(0, 3).join(", ")}.` : "";
   const drivers = neighborhood.drivers.slice(0, 2).map((driver) => driver.love);
-  return `${neighborhood.name} is #${neighborhood.rank} in your ranking.${reasons}${drivers.length ? ` ${drivers.join(" and ")} contribute most to its fit.` : ""}`;
+  return `${neighborhood.name} is #${neighborhood.rank} in your ranking.${reasons}${drivers.length ? ` ${drivers.join(" and ")} contribute most to its fit.` : ""}${neighborhood.rankingNote ? ` ${neighborhood.rankingNote}` : ""}`;
 }
 
 export function placesReply(neighborhood: Neighborhood, places: Place[]): string {
@@ -22,6 +22,14 @@ export function placesReply(neighborhood: Neighborhood, places: Place[]): string
 
 /** Result cards use deterministic text so every number and place is traceable to the attached evidence. */
 export function cardReply(card: AgentCard): string {
+  if (card.kind === "plan") {
+    return card.itinerary.days.map((day, i) => {
+      const stops = day.stops.length ? `${day.stops.length} stops in ${day.neighborhood}, starting at ${day.stops[0].time}` : "no places could be scheduled";
+      const notes = day.note ? ` ${day.note}` : "";
+      const missed = day.missing.length ? ` ${day.missing.length} requests or slots remain unfilled.` : "";
+      return `Day ${i + 1}: ${stops}.${notes}${missed}`;
+    }).join(" ") + (card.itinerary.days.some(day => !day.stops.length || day.missing.length) ? " I can try another start time or a different area for the remaining gaps." : " Walking times are approximate.");
+  }
   if (card.kind === "spot") return card.result.verdict;
   if (card.kind === "decides") return card.result.summary;
   if (card.kind === "ranking") return card.neighborhoods[0] ? neighborhoodReply(card.neighborhoods[0]) : "There are no ranked neighborhoods for this taste yet.";
@@ -30,7 +38,7 @@ export function cardReply(card: AgentCard): string {
   const match = matches.find((item) => item.neighborhoodId === best?.id);
   if (!best || !match) return `There are no ranked matches for ${source.neighborhood}, ${source.city} yet.`;
   const twin = match.twins[0];
-  return `${best.name} is the closest ranked match to ${source.neighborhood}, ${source.city}, with a similarity score of ${match.similarity}/100.${match.sharedTags.length ? ` They share ${match.sharedTags.join(", ")}.` : ""}${twin ? ` ${twin.target.name} is a ${twin.target.category} counterpart to ${twin.source.name}.` : ""}`;
+  return `${best.name} is the closest ranked match to ${source.neighborhood}, ${source.city}, with a similarity score of ${match.similarity}/100.${match.sharedTags.length ? ` They share ${match.sharedTags.join(", ")}.` : ""}${twin ? ` ${twin.target.name} is a ${twin.target.category} counterpart to ${twin.source.name}.` : ""}${best.rankingNote ? ` ${best.rankingNote}` : ""}`;
 }
 export type FinalFacts = {
   changes: string[];
@@ -38,6 +46,7 @@ export type FinalFacts = {
   topNeighborhoods: string[];
   shared: boolean;
   rankingUnavailable: boolean;
+  rankingNote?: string;
   references: GenreReference[];
 };
 
@@ -50,7 +59,7 @@ export function describeChanges(before: ExploreState, after: ExploreState): stri
   const changes: string[] = [];
   if (before.city !== after.city) changes.push(`Changed the city to ${after.city}`);
   if (before.discovery !== after.discovery) changes.push(after.discovery > before.discovery
-    ? "Moved the crowd dial toward locals" : "Moved the crowd dial toward popular places");
+    ? "Moved the crowd dial toward quieter places" : "Moved the crowd dial toward popular places");
   if (before.days !== after.days) changes.push(`Set the trip to ${after.days} ${after.days === 1 ? "day" : "days"}`);
   if (before.budget !== after.budget) changes.push(after.budget == null
     ? "Set plans to use any price level" : `Set the plan’s price cap to ${"$".repeat(after.budget)}`);
@@ -85,23 +94,22 @@ export function finalFacts(before: ExploreState, after: ExploreState, ranking: N
   return {
     changes, topNeighborhood: ranking?.[0]?.name ?? null, topNeighborhoods: ranking?.slice(0, 3).map((item) => item.name) ?? [],
     shared: !!after.companion?.loves.length, rankingUnavailable: rankingChanged(before, after) && !ranking?.length, references,
+    ...(ranking?.[0]?.rankingNote ? { rankingNote: ranking[0].rankingNote } : {}),
   };
 }
 
 export function groundedReply(facts: FinalFacts): string {
   const clauses = [...facts.changes, ...facts.references.map((reference) => `for ${reference.taste} I used ${reference.names.join(" and ")} as ${reference.names.length === 1 ? "a reference point" : "reference points"}`)];
   const changes = clauses.length ? `${clauses.map((clause) => `${clause.startsWith("for ") ? "" : "I "}${clause[0].toLowerCase()}${clause.slice(1)}`).join("; ")}.` : "The requested settings already match your profile.";
-  if (facts.topNeighborhood) return `${changes} Your ${facts.shared ? "shared " : ""}best start is now ${facts.topNeighborhood}.`;
+  if (facts.topNeighborhood) return `${changes} Your ${facts.shared ? "shared " : ""}best start is now ${facts.topNeighborhood}.${facts.rankingNote ? ` ${facts.rankingNote}` : ""}`;
   if (facts.rankingUnavailable) return `${changes} The updated neighborhood ranking is not available yet.`;
   return changes;
 }
 
 export function completeDraft(text: string, facts: FinalFacts): string {
-  if (!text.trim() || /as an ai|\bsorry\b|reached the limit|send another message|timed out/i.test(text)) return groundedReply(facts);
-  // A pre-tool draft cannot know the new ranking. Prefer confirmed facts if it omitted a reference point.
-  if (facts.references.some((reference) => !text.toLowerCase().includes(reference.taste.toLowerCase()) || reference.names.some((name) => !text.includes(name)))) return groundedReply(facts);
-  if (facts.topNeighborhood && !text.includes(facts.topNeighborhood)) return `${text.trim()} Your ${facts.shared ? "shared " : ""}best start is now ${facts.topNeighborhood}.`;
-  return text.trim();
+  // Pre-tool prose has no authoritative place evidence. Rebuild it entirely from facts.
+  void text;
+  return groundedReply(facts);
 }
 
 export function continueTemplatePrefix(text: string, template: string): string | null {
@@ -120,7 +128,7 @@ export function continueTemplatePrefix(text: string, template: string): string |
 
 /** Streams immediately; both the final-generation budget and whole-request deadline apply. */
 export async function finalReply(input: AgentRequest, facts: FinalFacts, signal: AbortSignal, emit: (text: string) => void, budgetMs = FINAL_TIMEOUT_MS): Promise<string> {
-  if (signal.aborted || budgetMs <= 0) { const text = groundedReply(facts); emit(text); return text; }
+  if (signal.aborted || budgetMs <= 0 || facts.rankingNote) { const text = groundedReply(facts); emit(text); return text; }
   const controller = new AbortController();
   const started = performance.now();
   let timer = setTimeout(() => controller.abort(), Math.min(FINAL_TIMEOUT_MS, budgetMs));

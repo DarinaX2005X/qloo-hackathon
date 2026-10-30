@@ -3,13 +3,16 @@
 import { useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, CalendarPlus, Copy, Footprints, Plus, Shuffle } from "lucide-react";
-import type { Place } from "@/shared/contracts";
+import { ArrowRight, CalendarPlus, Copy, Footprints, Plus, Shuffle, X } from "lucide-react";
+import type { Itinerary, Place } from "@/shared/contracts";
 import { activeLoves } from "@/shared/contracts";
 import { useExplore } from "./store";
 import { Button, Segmented, Skeleton, Spinner } from "@/components/ui/primitives";
 import { cityName } from "@/components/ui/CityPicker";
 import { download, itineraryToIcs, itineraryToText } from "@/lib/ics";
+import { dayNoteLines } from "@/lib/explain";
+import { categoryRuleLabel, stopReasonLines, tagRuleLabel, walkText } from "@/lib/honest";
+import { MatchValue } from "@/components/ui/Match";
 import { ErrorNote, PlaceCard } from "./ResultsPanel";
 import { PlaceDrawer } from "./PlaceDrawer";
 import { PlanSettings } from "./TripControls";
@@ -82,6 +85,19 @@ function AddFromSaved() {
   );
 }
 
+/** Short plain lines per day instead of a line per empty slot. Never says "closed" unless the backend said so. */
+function DayNote({ d, city }: { d: Itinerary["days"][number]; city: string }) {
+  const lines = dayNoteLines(d, city);
+  if (!lines.length) return null;
+  return (
+    <ul data-testid="day-note" className="mt-2 space-y-0.5 rounded-[10px] bg-paper-sunk/70 px-2.5 py-1.5 text-[12.5px] leading-snug text-ink-2">
+      {lines.map((l) => (
+        <li key={l}>{l}</li>
+      ))}
+    </ul>
+  );
+}
+
 function Timeline() {
   const ex = useExplore();
   const plan = ex.plan.data;
@@ -99,6 +115,8 @@ function Timeline() {
     );
   if (!plan) return null;
   const edited = ex.exclude.length + ex.include.length > 0;
+  const city = cityName(ex.state.city);
+  const scoreOf = (name: string) => ex.hoods.data?.find((n) => n.name === name)?.score;
   return (
     <div className={`transition-opacity ${ex.plan.loading ? "opacity-60" : ""}`}>
       <div className="mb-2 flex items-center justify-between">
@@ -117,15 +135,24 @@ function Timeline() {
                     Day {di + 1}
                     {d.weekday ? `, ${cap(d.weekday)}` : ""}
                   </span>
-                  <span className="block truncate text-[12.5px] text-ink-2">
-                    In {d.neighborhood}, {d.stops.length} stops
+                  <span className="block text-[12.5px] leading-snug text-ink-2">
+                    In {d.neighborhood}
+                    {d.stops.length ? `, ${d.stops.length} ${d.stops.length === 1 ? "stop" : "stops"}` : ", no stops"}
+                    {scoreOf(d.neighborhood) !== undefined && (
+                      <>
+                        {" \u00b7 "}
+                        <MatchValue score={scoreOf(d.neighborhood)} size="sm" />
+                      </>
+                    )}
                   </span>
                 </span>
                 <span className={`shrink-0 text-[12px] font-[580] ${on ? "text-you-deep" : "text-ink-3"}`}>{on ? "On the map" : "Show on the map"}</span>
               </button>
               <ol className="relative ml-[22px] border-l-2 border-dashed border-line-strong pl-5">
                 <AnimatePresence initial={false}>
-                  {d.stops.map((s, si) => (
+                  {d.stops.map((s, si) => {
+                    const adapted = stopReasonLines(s.reasonCodes);
+                    return (
                     <motion.li
                       data-testid="plan-stop"
                       key={s.place.id}
@@ -142,19 +169,24 @@ function Timeline() {
                         <span className={`h-1.5 w-1.5 rounded-full ${on ? "bg-you" : "bg-ink-3"}`} />
                       </span>
                       {s.walkMin > 0 && (
-                        <span className="mb-1 flex items-center gap-1 text-[11.5px] text-ink-3">
-                          <Footprints size={12} /> {s.walkMin} min walk
+                        <span className="mb-1 flex items-center gap-1 text-[11.5px] text-ink-3" title="Straight-line distance, not a route">
+                          <Footprints size={12} /> {walkText(s.walkMin, s.walkIsApproximate ?? true)}
                         </span>
                       )}
                       <div className="flex items-baseline gap-2.5">
                         <span className="tnum w-11 shrink-0 text-[14px] font-[620] text-ink">{s.time}</span>
                         <button onClick={() => ex.setOpenPlace(s.place)} className="min-w-0 flex-1 text-left">
-                          <p className="truncate text-[15px] font-[580] text-ink hover:underline">{s.place.name}</p>
+                          <p className="line-clamp-2 text-[15px] font-[580] leading-snug text-ink hover:underline">{s.place.name}</p>
                           <p className="text-[12.5px] text-ink-3">
                             {s.slot}
                             {s.hoursNote === "hours not listed" ? ", hours not listed" : ""}
                             {ex.include.includes(s.place.id) ? ", your pick" : ""}
                           </p>
+                          {adapted.length > 0 && (
+                            <p data-testid="stop-reason" className="text-[12px] leading-snug text-[color-mix(in_oklch,var(--warn)_55%,var(--ink-2))]">
+                              {adapted.join(". ")}.
+                            </p>
+                          )}
                         </button>
                         <button
                           onClick={() => void ex.swapStop(s.place.id)}
@@ -166,15 +198,51 @@ function Timeline() {
                         </button>
                       </div>
                     </motion.li>
-                  ))}
+                    );
+                  })}
                 </AnimatePresence>
               </ol>
-              {d.missing.length > 0 && <p className="mt-2 text-[12.5px] text-ink-3">{d.missing.map((m) => (/[.:]/.test(m) ? m : `Nothing open nearby for ${m.toLowerCase()}.`)).join(" ")}</p>}
+              <DayNote d={d} city={city} />
             </section>
           );
         })}
       </div>
       <AddFromSaved />
+    </div>
+  );
+}
+
+/** What the current plan was told to leave out or keep, each one a chip that plans again without it. */
+function PlanRules() {
+  const ex = useExplore();
+  const { excludeCategories, excludeTags } = ex.planRules;
+  const stops = ex.plan.data?.days.flatMap((d) => d.stops) ?? [];
+  const nameOf = (id: string) => stops.find((s) => s.place.id === id)?.place.name ?? ex.saved.find((p) => p.id === id)?.name ?? null;
+  const chips = [
+    ...excludeCategories.map((c) => ({ key: `c:${c}`, label: categoryRuleLabel(c), remove: () => ex.removePlanRule({ kind: "category", value: c }) })),
+    ...excludeTags.map((t) => ({ key: `t:${t}`, label: tagRuleLabel(t), remove: () => ex.removePlanRule({ kind: "tag", value: t }) })),
+    ...ex.include.map((id) => ({ key: `i:${id}`, label: `Keep ${nameOf(id) ?? "a place you asked for"}`, remove: () => ex.removePlanRule({ kind: "include", value: id }) })),
+  ];
+  if (!chips.length) return null;
+  return (
+    <div data-testid="plan-rules" className="mt-3">
+      <p className="text-[12.5px] font-[560] text-ink-3">Kept every time you plan again</p>
+      <div className="mt-1.5 flex flex-wrap gap-1.5">
+        {chips.map((c) => (
+          <span key={c.key} className="flex h-8 max-w-full items-center gap-1 rounded-[9px] bg-paper-sunk pl-2.5 pr-0.5 text-[13px] font-[560] text-ink">
+            <span className="truncate">{c.label}</span>
+            <button
+              onClick={() => void c.remove()}
+              disabled={ex.plan.loading}
+              aria-label={`Remove “${c.label}” and plan again`}
+              title="Remove and plan again"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-[7px] text-ink-3 hover:bg-paper-raised hover:text-ink disabled:opacity-40"
+            >
+              <X size={13} />
+            </button>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -200,15 +268,20 @@ function PlanPanel() {
       ) : (
         <>
           <p className="mt-1.5 text-[14px] leading-relaxed text-ink-2">
-            {first ? (
+            {ex.planFrom === "assistant" && ex.plan.data ? (
+              <>
+                This plan came from the assistant, starting in <b className="font-[620] text-ink">{ex.plan.data.days[0]?.neighborhood}</b>. Times include approximate walking and are checked against opening hours where Qloo lists them. Plan again starts over from your ranking{ex.planRules.excludeCategories.length + ex.planRules.excludeTags.length + ex.include.length ? " and keeps the rules below" : ""}.
+              </>
+            ) : first ? (
               <>
                 Starting in <b className="font-[620] text-ink">{first.name}</b>
-                {ex.state.days > 1 && hoods.length > 1 ? ", then the next neighborhoods that fit you" : ""}. Stops are picked for your taste and checked against opening hours.
+                {ex.state.days > 1 && hoods.length > 1 ? ", then the next neighborhoods that fit you" : ""}. Stops are picked for your taste; times include approximate walking and are checked against opening hours where Qloo lists them.
               </>
             ) : (
               "Waiting for the ranking of neighborhoods."
             )}
           </p>
+          <PlanRules />
           <div className="mt-4 space-y-2">
             <PlanSettings />
             <Button variant={ex.plan.data ? "secondary" : "primary"} size="md" className="w-full" disabled={ex.plan.loading || !hoods.length} onClick={() => void ex.makePlan()}>

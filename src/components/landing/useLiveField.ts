@@ -5,15 +5,19 @@ import type { ExploreState, Neighborhood, ResolvedLove, TasteField } from "@/sha
 import { pickEntity } from "@/lib/pick";
 import { api } from "@/components/explore/api";
 import { emptyState } from "@/lib/state";
-import type { LandingScene } from "./scenes";
+import { domainOf, landingName, nameOf, type LandingName, type LandingScene } from "./scenes";
 
 /** Resolve a short list of names to Qloo entities, in order, skipping misses. */
-export async function resolveNames(names: string[]): Promise<ResolvedLove[]> {
+export async function resolveNames(names: LandingName[]): Promise<ResolvedLove[]> {
   const out = await Promise.all(
-    names.map(async (q) => {
+    names.map(async (item) => {
+      const q = nameOf(item);
+      const domain = domainOf(item);
       try {
-        const r = await api.search(q);
-        return { query: q, chosen: pickEntity(q, r), candidates: r, weight: 1 } as ResolvedLove;
+        // a landing name with a domain hint is looked up within that domain, as the server does
+        let r = domain ? await api.search(q, domain).catch(() => []) : [];
+        if (!r.length) r = await api.search(q);
+        return { query: q, chosen: landingName(q, pickEntity(q, r)), candidates: r, weight: 1 } as ResolvedLove;
       } catch {
         return { query: q, chosen: null, candidates: [], weight: 1 } as ResolvedLove;
       }

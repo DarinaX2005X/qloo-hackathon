@@ -7,11 +7,13 @@ import { specificPlaceGenre } from "./taste-tags";
 export const PLACE_TAG_TYPES = ["urn:tag:ambience:qloo", "urn:tag:decor:qloo", "urn:tag:genre:place"] as const;
 
 export function tagName(name: string): string {
-  return name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+  return name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase()
+    .replace(/^(?:traditional|authentic|modern|contemporary) (japanese|italian|french|chinese|korean|indian|thai|mexican)$/, "$1");
 }
 
 export function usefulExplanation(text: string): boolean {
-  return !/\b(?:payments?|parking|credit cards?|debit cards?|wheelchair|accessib\w*|inclusiv\w*|ratings?|stars?|women.owned|identifies as|odou?rs?|unpleasant|dirty|rude|smell\w*|reported|complaints?|unsanitary|overpriced)\b/i.test(text.replace(/[_:-]/g, " "));
+  return !/^(?:tourist attractions?|professional|traditional|restaurants?|bars?|caf[eé]s?|coffee(?: shops?)?|hotels?|museums?|parks?|shopping|shopping mall|food|drinks?|business|establishment|point of interest)$/i.test(text.trim()) &&
+    !/\b(?:payments?|parking|credit cards?|debit cards?|wheelchair|accessib\w*|inclusiv\w*|ratings?|stars?|women.owned|identifies as|odou?rs?|unpleasant|dirty|rude|smell\w*|reported|complaints?|unsanitary|overpriced)\b/i.test(text.replace(/[_:-]/g, " "));
 }
 
 export function meaningfulTag(tag: TagRef): boolean {

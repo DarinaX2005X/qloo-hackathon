@@ -10,11 +10,11 @@ import { Button } from "@/components/ui/primitives";
 import { emptyState, encodeState } from "@/lib/state";
 import { resolveNames, useLiveField } from "./useLiveField";
 import { useLanding } from "./LandingData";
-import { LANDING, type LandingScene } from "./scenes";
+import { LANDING, namesText, type LandingName, type LandingScene } from "./scenes";
 import { AnyCity, Demo, H2, MakeItYours } from "./More";
 
 /** Loves for a landing scene: ready from the server, resolved here only as a fallback. */
-function useResolved(names: string[], prepared: LandingScene | null | undefined, pick: "loves" | "companion" = "loves") {
+function useResolved(names: LandingName[], prepared: LandingScene | null | undefined, pick: "loves" | "companion" = "loves") {
   const { settled } = useLanding();
   const [loves, setLoves] = useState<ResolvedLove[]>([]);
   useEffect(() => {
@@ -28,7 +28,7 @@ function useResolved(names: string[], prepared: LandingScene | null | undefined,
 }
 
 
-function TasteCard({ title, names, city, scene }: { title: string; names: string[]; city: string; scene: "reader" | "owl" }) {
+function TasteCard({ title, names, city, scene }: { title: string; names: LandingName[]; city: string; scene: "reader" | "owl" }) {
   const { data, markReady } = useLanding();
   const loves = useResolved(names, data?.[scene]);
   const { field, hoods } = useLiveField(city, loves, null, true, data?.[scene]);
@@ -40,7 +40,7 @@ function TasteCard({ title, names, city, scene }: { title: string; names: string
       </div>
       <div className="p-5 sm:p-6">
         <p className="text-[13px] font-[560] text-ink-3">{title}</p>
-        <p className="mt-1 text-[19px] font-[620] leading-snug tracking-[-0.015em] text-ink">{names.join(", ")}</p>
+        <p className="mt-1 text-[19px] font-[620] leading-snug tracking-[-0.015em] text-ink">{namesText(names)}</p>
         <div className="mt-4 flex items-end justify-between gap-4">
           <ol className="space-y-1 text-[15px] text-ink-2">
             {(hoods ?? []).slice(0, 3).map((h) => (
@@ -90,12 +90,12 @@ const STEPS = [
   },
   {
     title: "The city becomes a taste field",
-    body: "For each thing you love, Qloo returns how strongly its audience over-indexes across the city. Homing weighs them the way you tell it to and lifts the places where they overlap.",
+    body: "For each thing you love, Qloo returns how strongly its audience over-indexes across the city. Homing corrects each map for how busy every cell is, weighs your loves the way you tell it to and ranks where they overlap.",
     call: "Qloo insights, heatmap",
   },
   {
-    title: "Popular or local is your call",
-    body: "Every cell also knows how busy it is overall. The crowd dial separates where your people go from where everybody goes.",
+    title: "Popular or less busy is your call",
+    body: "Every cell also knows how busy it is overall in Qloo's data. The crowd dial leans toward or away from the busiest areas; it says nothing about who lives there.",
     call: "Popularity per cell",
   },
   {

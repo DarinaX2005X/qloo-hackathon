@@ -61,12 +61,37 @@ export function homeTwins(source: HomePlace[], rows: QlooRecord[]): HomeResult["
   const twins: HomeResult["matches"][number]["twins"] = [];
   for (const row of targets) {
     const target = homePlace(row);
-    const origin = source.find((place) => place.category && place.category === target.category && place.id !== target.id && !used.has(place.id));
+    const origin = source.filter((place) => place.category && place.category === target.category && place.id !== target.id && !used.has(place.id))
+      .map(place => ({ place, overlap: place.tags.filter(tag => distinctiveTwinTag(tag) && target.tags.some(t => tagName(t) === tagName(tag))).length }))
+      .filter(item => item.overlap > 0).sort((a, b) => b.overlap - a.overlap)[0]?.place;
     if (!origin || used.has(target.id)) continue;
     twins.push({ source: origin, target }); used.add(origin.id); used.add(target.id);
     if (twins.length === 3) break;
   }
   return twins;
+}
+
+export function distinctiveTwinTag(name: string): boolean {
+  return !new Set(["casual", "modern", "social", "unique", "charming", "classy", "fun", "lively", "busy", "comfortable", "energetic"]).has(tagName(name));
+}
+
+/** Weighted Jaccard of venue-frequency taste profiles: sparse/disjoint evidence stays low. */
+export function homeSimilarity(source: QlooRecord[], target: QlooRecord[]): number {
+  const vector = (rows: QlooRecord[]) => {
+    const values = new Map<string, number>();
+    for (const row of rows) for (const tag of homeTags([row], 100)) {
+      const name = tagName(tag.name);
+      values.set(name, (values.get(name) ?? 0) + 1 / rows.length);
+    }
+    return values;
+  };
+  const a = vector(source), b = vector(target);
+  let intersection = 0, union = 0;
+  for (const name of new Set([...a.keys(), ...b.keys()])) {
+    intersection += Math.min(a.get(name) ?? 0, b.get(name) ?? 0);
+    union += Math.max(a.get(name) ?? 0, b.get(name) ?? 0);
+  }
+  return union ? Math.round(100 * intersection / union) : 0;
 }
 
 export async function findHome(input: HomeRequest): Promise<HomeResult> {
@@ -92,8 +117,8 @@ export async function findHome(input: HomeRequest): Promise<HomeResult> {
       ...signals(homeLoves(places)), take: 30 });
     const nearby = resultRows(response, "entities").filter((row) => coordinates(row) && record(row.properties).is_closed !== true &&
       haversine(neighborhood.center, coordinates(row)!) <= 900 && normalizedAreaName(neighborhoodName(row) ?? "") === normalizedAreaName(neighborhood.name));
-    const matched = new Set([...neighborhood.matchedTags, ...matchedPlaceTags(nearby, tags, true, 6)].map(tagName));
-    return { neighborhoodId: neighborhood.id, similarity: Math.round(100 * unit(neighborhood.score)),
+    const matched = new Set(matchedPlaceTags(nearby, tags, true, 6).map(tagName));
+    return { neighborhoodId: neighborhood.id, similarity: homeSimilarity(rows, nearby),
       sharedTags: tags.filter((tag) => matched.has(tagName(tag.name))).slice(0, 4).map((tag) => tag.name), twins: homeTwins(places, nearby) };
   }));
   return HomeResult.parse({ source: { city: source.city, neighborhood: source.neighborhood, center, places, tags: tags.map((tag) => tag.name) }, field, neighborhoods, matches });

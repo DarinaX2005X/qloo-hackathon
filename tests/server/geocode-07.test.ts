@@ -38,9 +38,9 @@ describe("07 shared geocoding", () => {
     expect(relevantGeocode({ name: "City", label: "City", query: "City", center: [0, 0] }, "Missing, City")).toBe(false);
   });
   it("preserves city autocomplete filters and labels", async () => {
-    fetcher.mockResolvedValue(Response.json({ features: [{ geometry: { coordinates: [-122, 45] }, properties: { name: "Portland", state: "Oregon", country: "United States" } }] }));
+    fetcher.mockResolvedValue(Response.json({ features: [{ geometry: { coordinates: [-122, 45] }, properties: { name: "Portland", state: "Oregon", country: "United States", osm_key: "place", osm_value: "city" } }] }));
     expect((await photon("Portland"))[0].query).toBe("Portland, Oregon");
-    expect(new URL(String(fetcher.mock.calls[0][0])).searchParams.getAll("osm_tag")).toEqual(["place:city", "place:town"]);
+    expect(new URL(String(fetcher.mock.calls[0][0])).searchParams.getAll("osm_tag")).toEqual(["place:city", "place:town", "place:village"]);
   });
 });
 

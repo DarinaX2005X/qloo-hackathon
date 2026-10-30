@@ -60,7 +60,7 @@ export function DiscoveryControl({ width = 300 }: { width?: number }) {
     <div className="flex items-center gap-3" style={{ width }}>
       <span className="shrink-0 text-[13px] font-[580] text-ink-2">Crowd</span>
       <div className="flex-1">
-        <Dial label="Popular or local" value={ex.state.discovery} onChange={(v) => ex.patch([{ op: "set_discovery", value: v }])} left="Popular" right="Local" />
+        <Dial label="Popular or less busy" value={ex.state.discovery} onChange={(v) => ex.patch([{ op: "set_discovery", value: v }])} left="Popular" right="Less busy" />
       </div>
     </div>
   );

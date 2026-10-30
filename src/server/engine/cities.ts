@@ -10,6 +10,7 @@ import { mean } from "./geo";
 import { displayName } from "./places";
 import { signals } from "./signals";
 import { rankNeighborhoods } from "./neighborhoods";
+import { validateCity } from "@/server/geo/geocode";
 
 /** Fixed-denominator taste coverage, independent of Qloo's within-city affinity ranks. */
 export function cityPlaceCoverage(row: QlooRecord, fingerprint: TagRef[]): number {
@@ -75,7 +76,7 @@ export async function scoreCity(state: ExploreState, city: string, fingerprint: 
 }
 
 export async function compareCities(state: ExploreState, cities: string[]): Promise<CityScore[]> {
-  if (cities.some((city) => !city.trim())) throw apiError("bad_input", "City names cannot be blank.");
+  await Promise.all(cities.map(city => validateCity(city)));
   if (!activeLoves([...state.loves, ...(state.companion?.loves ?? [])]).length)
     throw apiError("bad_input", "Choose at least one resolved love to compare cities.");
   const fingerprint = await buildFingerprint({ ...state, refinements: [] });

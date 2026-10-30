@@ -106,7 +106,7 @@ export function spotVerdict(city: string, percentile: number, neighborhood: Spot
   const labels = [["coffee", "café", "cafés"], ["food", "restaurant", "restaurants"], ["drinks", "bar", "bars"], ["culture", "culture stop", "culture stops"]] as const;
   const listed = labels.filter(([key]) => counts[key]).map(([key, one, many]) => `${counts[key]} ${counts[key] === 1 ? one : many}`);
   const nearby = listed.length ? `${listed.join(", ").replace(/, ([^,]*)$/, " and $1")} that fit you within 12 minutes` : "no matching walkable places found within 12 minutes";
-  return `${street ? `${street} (the street, house number not found) is better` : "Better"} than ${percentile}% of mapped ${city} for your taste${neighborhood ? `, in ${neighborhood.name} (#${neighborhood.rank})` : ""}, with ${nearby}.`;
+  return `${street ? `${street} (the street, house number not found): better` : "Better"} than ${percentile}% of mapped ${city} for your taste${neighborhood ? `, in ${neighborhood.name} (#${neighborhood.rank})` : ""}, with ${nearby}. This is a neighborhood-level estimate on a roughly 1 km grid; walking times are approximate.`;
 }
 
 export async function checkSpot(input: SpotRequest): Promise<SpotResult> {
@@ -127,6 +127,6 @@ export async function checkSpot(input: SpotRequest): Promise<SpotResult> {
   const neighborhood = spotNeighborhood(ranked, point);
   const { walk, counts } = spotWalk(places, point);
   const label = found?.label ?? query ?? pinLabel ?? neighborhood?.name ?? "Pinned spot";
-  return SpotResult.parse({ label, point, score: value.score, percentile, neighborhood,
+  return SpotResult.parse({ label, point, score: value.score, percentile, neighborhood, resolutionM: 1200, walkIsApproximate: true, estimateScope: "neighborhood",
     drivers: spotDrivers(value.drivers, state), walk, counts, verdict: spotVerdict(state.city, percentile, neighborhood, counts, found?.streetLevel ? found.street ?? found.name : undefined) });
 }

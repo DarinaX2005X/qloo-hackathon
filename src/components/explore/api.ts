@@ -1,3 +1,4 @@
+import { quotaText } from "@/lib/honest";
 import type {
   AgentEvent,
   CityScore,
@@ -45,6 +46,8 @@ async function once<T>(path: string, init: RequestInit & { json?: unknown } = {}
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const err = (body as ApiError | null)?.error;
+    // a rate limit is not a failure: say so plainly, next to the action, and let the person try again
+    if (res.status === 429 || err?.code === "quota") throw new HomingError("quota", quotaText(), true);
     throw new HomingError(err?.code ?? "qloo_unavailable", err?.message ?? "Something went wrong on our side.", err?.retryable ?? true);
   }
   return body as T;
@@ -52,14 +55,15 @@ async function once<T>(path: string, init: RequestInit & { json?: unknown } = {}
 
 const RETRY_MS = [900, 2400];
 
-/** Retries transient failures (cold start, quota, network) quietly before the person sees an error. */
+/** Retries transient failures (cold start, network) quietly before the person sees an error. A rate limit
+ *  is shown at once: the bucket refills over ~10 s, longer than a quiet retry should hang. */
 async function call<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await once<T>(path, init);
     } catch (e) {
       const err = e as HomingError;
-      const transient = err.retryable && (err.code === "network" || err.code === "qloo_unavailable" || err.code === "quota");
+      const transient = err.retryable && (err.code === "network" || err.code === "qloo_unavailable");
       if (!transient || attempt >= RETRY_MS.length || init.signal?.aborted) throw err;
       await new Promise((r) => setTimeout(r, RETRY_MS[attempt]));
       if (init.signal?.aborted) throw new HomingError("aborted", "aborted", false);
@@ -79,8 +83,23 @@ export const api = {
   fingerprint: (s: ExploreState, signal?: AbortSignal) => call<Fingerprint>("/api/fingerprint", { json: s, signal }),
   places: (s: ExploreState, neighborhoodId: string, categories?: Category[], signal?: AbortSignal) =>
     call<{ places: Place[] }>("/api/places", { json: { ...s, neighborhoodId, categories }, signal }).then((r) => r.places),
-  plan: (s: ExploreState, neighborhoodIds: string[], opts: { exclude?: string[]; include?: string[] } = {}, signal?: AbortSignal) =>
-    call<Itinerary>("/api/plan", { json: { ...s, neighborhoodIds, exclude: opts.exclude ?? [], include: opts.include ?? [] }, signal }),
+  plan: (
+    s: ExploreState,
+    neighborhoodIds: string[],
+    opts: { exclude?: string[]; include?: string[]; excludeCategories?: Category[]; excludeTags?: string[] } = {},
+    signal?: AbortSignal,
+  ) =>
+    call<Itinerary>("/api/plan", {
+      json: {
+        ...s,
+        neighborhoodIds,
+        exclude: opts.exclude ?? [],
+        include: opts.include ?? [],
+        ...(opts.excludeCategories?.length ? { excludeCategories: opts.excludeCategories } : {}),
+        ...(opts.excludeTags?.length ? { excludeTags: opts.excludeTags } : {}),
+      },
+      signal,
+    }),
   home: (s: ExploreState, source: { city: string; neighborhood: string; point?: [number, number] }, blend = 0, signal?: AbortSignal) =>
     call<HomeResult>("/api/home", { json: { state: s, source, blend }, signal }),
   spot: (s: ExploreState, where: { query?: string; point?: [number, number] }, signal?: AbortSignal) =>
@@ -88,7 +107,25 @@ export const api = {
   decides: (s: ExploreState, signal?: AbortSignal) => call<DecidesResult>("/api/decides", { json: s, signal }),
   cities: (s: ExploreState, cities: string[], signal?: AbortSignal) =>
     call<{ cities: CityScore[] }>("/api/cities", { json: { state: s, cities }, signal }).then((r) => r.cities),
+  /** One city on its own, so each card can appear as soon as it is scored. */
+  city: async (s: ExploreState, city: string, signal?: AbortSignal): Promise<CityScore> => {
+    if (singleCity !== false) {
+      try {
+        const [one] = await api.cities(s, [city], signal);
+        singleCity = true;
+        return one;
+      } catch (e) {
+        // a server that still wants two or more cities answers bad_input; ask with the city twice instead
+        if ((e as HomingError).code !== "bad_input" || singleCity === true) throw e;
+        singleCity = false;
+      }
+    }
+    const [one] = await api.cities(s, [city, city], signal);
+    return one;
+  },
 };
+/** Whether /api/cities accepts a single city (null until the first answer). */
+let singleCity: boolean | null = null;
 
 /** Streams the agent. Calls onEvent for every server-sent event until done or error. */
 export async function streamAgent(
@@ -106,6 +143,10 @@ export async function streamAgent(
   }
   if (!res.ok || !res.body) {
     const err = (await res.json().catch(() => null)) as ApiError | null;
+    if (res.status === 429 || err?.error?.code === "quota") {
+      onEvent({ type: "error", error: { code: "quota", message: quotaText("your question"), retryable: true } });
+      return;
+    }
     onEvent({ type: "error", error: err?.error ?? { code: "llm_unavailable", message: "The assistant is unavailable right now.", retryable: true } });
     return;
   }
@@ -139,7 +180,9 @@ export async function streamAgent(
       if (!data) continue;
       try {
         const body = JSON.parse(data) as Record<string, unknown>;
-        onEvent({ ...body, type: (body.type as string | undefined) ?? type } as AgentEvent);
+        const event = { ...body, type: (body.type as string | undefined) ?? type } as AgentEvent;
+        if (event.type === "error" && event.error?.code === "quota") event.error = { ...event.error, message: quotaText("your question") };
+        onEvent(event);
       } catch {
         /* ignore malformed frame */
       }
