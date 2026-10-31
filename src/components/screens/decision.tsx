@@ -8,7 +8,9 @@ import { AreaRank, HomeOverlap, SupportTag } from "@/components/ui/Metric";
 import { OVERLAP_EXPLAINER, overlapText } from "@/lib/honest";
 import { cityName } from "@/components/ui/CityPicker";
 import { Button } from "@/components/ui/primitives";
-import { ROLE_PLURAL, SourcePlaceChip, VenueRow, areaName, areaScale, bestConnection, connectionLine, useLoveName } from "./venue";
+import { ROLE_PLURAL, SourcePlaceChip, VenueRow, areaName, areaScale, bestConnection, connectionLine, placeLead, useLoveName } from "./venue";
+import { useExplore } from "@/components/explore/store";
+import { activeLoves } from "@/shared/contracts";
 import type { AddressView, ComparisonView, ExplainView, HomeView } from "./features";
 import { counterfactual, moveText } from "./ablation";
 export { counterfactual, movesOutsideTie } from "./ablation";
@@ -525,7 +527,10 @@ export function AblationRows({ rows, compact }: { rows: AblationV2[]; compact?: 
  */
 export function AreaProof({ area, ablations, compact = false, actions }: { area: AreaDecision; ablations?: AblationV2[]; compact?: boolean; actions?: AreaActions }) {
   const loveName = useLoveName();
+  const loveCount = activeLoves(useExplore().state.loves).length;
   const linked = area.anchors.map((v) => ({ v, c: bestConnection(v, loveName) })).find((x) => x.c);
+  // name one love only when it clearly leads Qloo's reason for the place (the area cards' rule)
+  const lead = linked?.c?.explanationKind === "provider" ? placeLead(linked.v, loveName, loveCount) : "one";
   const rows = (ablations ?? []).filter((a) => a.areaId === area.area.id);
   const cf = counterfactual(rows, loveName);
   const roles = [...new Set(area.anchors.filter((v) => v.eligibility === "eligible").map((v) => v.role))];
@@ -538,7 +543,16 @@ export function AreaProof({ area, ablations, compact = false, actions }: { area:
     <section data-testid="area-proof" aria-label={`Why ${area.area.name}`} className={compact ? "" : "space-y-2.5"}>
       {!compact && area.headline && <p className="text-[15px] font-[560] leading-snug text-ink">{area.headline}</p>}
       <ul className={compact ? "space-y-1.5" : "space-y-2.5"}>
-        {linked && linked.c && (
+        {linked && linked.c && lead !== "one" && (
+          <li className={line} data-testid="proof-link" data-lead={lead}>
+            <span className={`${dot} bg-ink-3`} />
+            <span>
+              <b className="font-[620]">{linked.v.place.name}</b> is linked to {lead === "all" ? "all your loves" : "several of your loves"}
+              <span className="block text-[12.5px] text-ink-3">Qloo&apos;s reason for it is split about evenly between them, so no single love leads.</span>
+            </span>
+          </li>
+        )}
+        {linked && linked.c && lead === "one" && (
           <li className={line} data-testid="proof-link">
             <span className={dot} style={{ background: loveName(linked.c.loveId)?.ink ?? "var(--you)" }} />
             <span>
@@ -623,7 +637,7 @@ export function ExplanationCard({ view, areaName: name, compact = false }: { vie
 
 type CityResult = ComparisonView["results"][number];
 
-function CityResultCard({ r, i, onOpenCity, sourceName, compact }: { r: CityResult; i: number; onOpenCity?: (city: string) => void; sourceName?: string | null; compact?: boolean }) {
+function CityResultCard({ r, i, onOpenCity, sourceName, compact, byRank }: { r: CityResult; i: number; onOpenCity?: (city: string) => void; sourceName?: string | null; compact?: boolean; byRank?: boolean }) {
   const [open, setOpen] = useState(false);
   if (r.status === "error")
     return (
@@ -637,6 +651,8 @@ function CityResultCard({ r, i, onOpenCity, sourceName, compact }: { r: CityResu
   const method = home[0]?.similarity.method;
   const areas = home.length ? home.slice(0, 3).map((m) => ({ id: m.area.area.id, name: areaName(m.area.area), sim: m.similarity })) : r.areas.slice(0, 3).map((a) => ({ id: a.area.id, name: areaName(a.area), sim: null }));
   const anchors = (home[0]?.area.anchors.length ? home[0].area.anchors : r.areas[0]?.anchors ?? []).slice(0, 2);
+  // taste-only comparison (personal_area_rank_v1): each city's own #1 area and its reason; no cross-city number exists
+  const first = byRank && !home.length ? r.areas[0] ?? null : null;
   return (
     <motion.li
       layout
@@ -650,7 +666,12 @@ function CityResultCard({ r, i, onOpenCity, sourceName, compact }: { r: CityResu
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-[19px] font-[650] tracking-[-0.02em]">{r.cityName}</p>
-          {overlap !== null && r.support === "sufficient" ? (
+          {first ? (
+            <p data-testid="city-first-area" className="mt-0.5 text-[13px] font-[580] leading-snug text-ink-2">
+              <span className="text-ink">{areaName(first.area)}</span> is <span className="tnum">#{Math.max(1, Math.round(first.metrics.rank))}</span>
+              {first.metrics.candidateCount >= first.metrics.rank ? ` of ${first.metrics.candidateCount} areas checked here` : " here"}
+            </p>
+          ) : overlap !== null && r.support === "sufficient" ? (
             <p className="tnum mt-0.5 text-[13px] font-[580] text-ink-2">
               {sourceName ? (method?.startsWith("style_only") ? "Style overlap" : "Cultural-profile overlap") : "Overlap with your taste"} {Math.round(overlap)}/100
             </p>
@@ -663,7 +684,8 @@ function CityResultCard({ r, i, onOpenCity, sourceName, compact }: { r: CityResu
           {r.status === "partial" && <span className="text-[12px] font-[560] text-ink-3">Partly checked</span>}
         </div>
       </div>
-      {areas.length > 0 && (
+      {first?.headline && <p data-testid="city-first-reason" className="mt-1.5 text-[13px] leading-snug text-ink">{first.headline}</p>}
+      {areas.length > 0 && !(first && areas.length === 1) && (
         <ol className="mt-2.5 space-y-1">
           {areas.map((a, k) => (
             <li key={a.id} className="flex items-baseline justify-between gap-2 text-[13.5px]">
@@ -725,7 +747,7 @@ export function ComparisonCard({ view, compact = false, onOpenCity, sourceName }
       )}
       <ol className={`grid gap-2.5 ${compact ? "mt-2" : "min-[1100px]:grid-cols-2"}`}>
         {view.results.map((r, i) => (
-          <CityResultCard key={r.cityId + i} r={r} i={i} onOpenCity={onOpenCity} sourceName={sourceName} compact={compact} />
+          <CityResultCard key={r.cityId + i} r={r} i={i} onOpenCity={onOpenCity} sourceName={sourceName} compact={compact} byRank={view.method === "personal_area_rank_v1"} />
         ))}
       </ol>
     </div>

@@ -92,6 +92,22 @@ export function bestConnection(v: VenueEvidence, known: (id: string) => unknown)
 }
 
 /**
+ * Whether one love clearly leads Qloo's reason for a place. The same rule as the area cards: a love is named only
+ * when its share is above an equal share (1/n of the active loves) plus 0.1 and no other love ties it; otherwise
+ * the place is "linked to all your loves" (every active love took part) or "to several". Raw shares stay in the data.
+ */
+export function placeLead(v: VenueEvidence, known: (id: string) => unknown, loveCount: number): "one" | "all" | "several" {
+  const provider = v.connections.filter((c) => c.explanationKind === "provider" && c.providerContribution !== undefined && !!known(c.loveId));
+  const loves = new Set(provider.map((c) => c.loveId.toLowerCase()));
+  if (loveCount < 2 || loves.size < 2) return "one";
+  const shares = [...provider].sort((a, b) => (b.providerContribution ?? 0) - (a.providerContribution ?? 0));
+  const top = shares[0].providerContribution ?? 0;
+  const next = shares.find((c) => c.loveId.toLowerCase() !== shares[0].loveId.toLowerCase())?.providerContribution ?? 0;
+  if (top > 1 / loveCount + 0.1 && top - next > 0.005) return "one";
+  return loves.size >= loveCount ? "all" : "several";
+}
+
+/**
  * A place as evidence: what kind of place it is first, then its name, then why it is here and what is
  * not known about it. Opens the place on the map when the parent passes onOpen.
  */
@@ -117,6 +133,7 @@ export function VenueRow({
   const Icon = ROLE_ICON[v.role];
   const c = note ? null : bestConnection(v, loveName);
   const love = c ? loveName(c.loveId) : null;
+  const lead = c && c.explanationKind === "provider" ? placeLead(v, loveName, activeLoves(ex.state.loves).length) : "one";
   const genre = genreLabel(v.place.primaryGenre);
   const facts = [ROLE_LABEL[v.role], genre && genre !== ROLE_LABEL[v.role].toLowerCase() ? genre : null, priceText(v)].filter(Boolean) as string[];
   // unknown hours are said once, in plain words, instead of repeating the backend's note on every place
@@ -132,6 +149,11 @@ export function VenueRow({
         <span className={`block truncate font-[600] text-ink ${compact ? "text-[13.5px]" : "text-[14.5px]"}`}>{v.place.name}</span>
         {note ? (
           <span className="block text-[12.5px] leading-snug text-ink-2">{note}</span>
+        ) : c && love && lead !== "one" ? (
+          <span data-testid="venue-lead" className="flex items-center gap-1.5 text-[12.5px] leading-snug text-ink-2">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-ink-3" aria-hidden />
+            <span className="min-w-0">{lead === "all" ? "Linked to all your loves" : "Linked to several of your loves"}</span>
+          </span>
         ) : c && love ? (
           <span className="flex items-center gap-1.5 text-[12.5px] leading-snug text-ink-2">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: love.ink }} aria-hidden />

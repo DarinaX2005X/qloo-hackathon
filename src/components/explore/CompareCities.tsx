@@ -135,7 +135,9 @@ export function CityCompare({ onOpenCity }: { onOpenCity: (city: string) => void
               <p className="mt-3 text-[12.5px] leading-relaxed text-ink-3">
                 {c.source
                   ? `Each city's number is the middle of its three closest areas to ${c.source.neighborhood}, on the same 0 to 100 scale. Differences of a few points are not a real difference.`
-                  : "Each city is checked for your loves with the same method. The number is an overlap index from 0 to 100, not a chance that you will like living there."}
+                  : c.data.method === "personal_area_rank_v1"
+                    ? "Each city's areas are ranked for your loves on their own. #1 means first among that city's areas; the ranks of two cities are not compared with each other."
+                    : "Each city is checked for your loves with the same method. The number is an overlap index from 0 to 100, not a chance that you will like living there."}
               </p>
             </div>
           </div>
