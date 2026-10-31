@@ -961,7 +961,7 @@ function useStore() {
       clearTimeout(deadline);
       upd((t) =>
         timedOut && t.pending
-          ? { ...t, pending: false, error: t.error ?? `No final answer after ${AGENT_CLIENT_TIMEOUT_MS / 1000} s, so Homing stopped waiting. Anything that already arrived is kept above. Try again.` }
+          ? { ...t, pending: false, error: t.error ?? `No final answer after ${AGENT_CLIENT_TIMEOUT_MS / 1000} s, so Homing stopped waiting. Any part that already arrived stays on screen. Try again.` }
           : { ...t, pending: false, stopped: ac.signal.aborted && !t.error ? true : t.stopped },
       );
       if (agentAbort.current === ac) agentAbort.current = null;

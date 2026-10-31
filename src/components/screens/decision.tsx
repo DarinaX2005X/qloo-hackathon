@@ -416,7 +416,7 @@ export function AddressCard({
             </span>
           </p>
         )}
-        <p className="mt-3 text-[12px] leading-snug text-ink-3">This describes the streets around the point, not the flat or the building.</p>
+        {!p.warn && <p className="mt-3 text-[12px] leading-snug text-ink-3">This describes the streets around the point, not the flat or the building.</p>}
         {a && <ActionRow area={a} actions={actions} />}
       </section>
 
